@@ -1,0 +1,72 @@
+{
+  "_note": "AUTHORED-NOT-RUN + DEFERRED (see OBL-001 _note). DCR-BRIDGE NOT YET WIRED: there is no DCR-constraint-zone -> durable-obligation bridge in wos-runtime (obligations.rs has no DCR coupling; advanced.DCR lives elsewhere and is not consumed by the obligation monitor). Until that bridge exists this fixture only exercises the ordinary obligation activation path so it parses and runs green; the intended DCR semantics (a DCR pending activity that cannot be excluded materializing/688 satisfying a durable obligation) MUST be authored once the bridge lands. Reserve id WOS-CONF-2311 for that work. Do NOT treat this as covering DCR.",
+  "id": "WOS-CONF-2311-OBL-011-dcr-bridge",
+  "rule": "WOS-OBL-RUNTIME-0903",
+  "description": "DCR bridge (DEFERRED placeholder): reserved for DCR-constraint-zone to durable-obligation coupling; currently exercises only the plain activation path because no DCR/obligation bridge exists in the runtime.",
+  "documents": {
+    "kernel": "inline"
+  },
+  "inline_documents": {
+    "kernel": {
+      "$wosWorkflow": "1.0",
+      "url": "urn:test:OBL-011",
+      "version": "1.0.0",
+      "title": "OBL-011 DCR Bridge (deferred placeholder)",
+      "status": "active",
+      "impactLevel": "rightsImpacting",
+      "actors": [
+        { "id": "caseworker", "type": "human", "description": "Caseworker" },
+        { "id": "underwriter", "type": "human", "description": "Independent underwriter" }
+      ],
+      "lifecycle": {
+        "initialState": "open",
+        "states": {
+          "open": {
+            "type": "atomic",
+            "transitions": [
+              { "event": "caseFileUpdated", "target": "open" }
+            ]
+          }
+        }
+      },
+      "caseFile": {
+        "fields": {
+          "income": { "type": "number" }
+        }
+      },
+      "governance": {
+        "obligationPolicies": [
+          {
+            "id": "income-change-review-required",
+            "activateWhen": { "on": { "event": "caseFileUpdated" }, "where": "event.field = 'income'" },
+            "satisfyWhen": {
+              "on": { "event": "underwritingReviewCompleted" },
+              "actor": { "role": "underwriter", "notSameAsTriggerActor": true }
+            },
+            "responsibleRole": "underwriter",
+            "duplicatePolicy": "ignoreWhilePending",
+            "onViolation": "block"
+          }
+        ]
+      },
+      "execution": {
+        "workflowTimeout": "P90D",
+        "defaultTaskTimeout": "P7D",
+        "instanceVersioning": "pinned"
+      }
+    }
+  },
+  "initial_case_state": {},
+  "event_sequence": [
+    { "event": "caseFileUpdated", "actor": "caseworker", "data": { "field": "income" } }
+  ],
+  "expected_transitions": [
+    { "from": "open", "target": "open", "event": "caseFileUpdated" }
+  ],
+  "expected_provenance": [
+    {
+      "record_kind": "obligationActivated",
+      "data": { "policyId": "income-change-review-required", "obligationId": "income-change-review-required#0" }
+    }
+  ]
+}

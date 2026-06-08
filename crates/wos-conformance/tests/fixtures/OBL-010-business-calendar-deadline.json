@@ -1,0 +1,88 @@
+{
+  "_note": "AUTHORED-NOT-RUN + BEST-EFFORT (see OBL-001 _note). KNOWN LIMITATION: evaluate_activations computes a wall-clock deadline only; a business-day deadline (P2BD with calendarRef) currently returns None in obligations.rs::compute_deadline_iso (the calendar-aware obligation timer is the WOS-OBL-TIME-1002 follow-up). So today this obligation activates with NO stored deadline and the lazy expiry scan does NOT fire even after the delay. This fixture therefore asserts ONLY ObligationActivated, and attaches the businessCalendar sidecar (calendar version 'federal-fy2026-test-v1.0') so it is ready to assert ObligationExpired once WOS-OBL-TIME-1002 lands. Confirm: (a) whether the calendarRef must match the sidecar's targetWorkflow/version, and (b) the eventual expiry trace once calendar-aware obligation deadlines compute.",
+  "id": "WOS-CONF-2310-OBL-010-business-calendar-deadline",
+  "rule": "WOS-OBL-TIME-1002",
+  "description": "Business-calendar deadline (best-effort): an obligation with a P2BD deadline and a business-calendar sidecar activates; business-day deadline expiry is a tracked follow-up (WOS-OBL-TIME-1002).",
+  "documents": {
+    "kernel": "inline",
+    "businessCalendar": "inline"
+  },
+  "inline_documents": {
+    "kernel": {
+      "$wosWorkflow": "1.0",
+      "url": "urn:test:OBL-010",
+      "version": "1.0.0",
+      "title": "OBL-010 Business-Calendar Obligation Deadline",
+      "status": "active",
+      "impactLevel": "rightsImpacting",
+      "actors": [
+        { "id": "caseworker", "type": "human", "description": "Caseworker" },
+        { "id": "underwriter", "type": "human", "description": "Independent underwriter" },
+        { "id": "system", "type": "system", "description": "System clock actor" }
+      ],
+      "lifecycle": {
+        "initialState": "open",
+        "states": {
+          "open": {
+            "type": "atomic",
+            "transitions": [
+              { "event": "caseFileUpdated", "target": "open" }
+            ]
+          }
+        }
+      },
+      "caseFile": {
+        "fields": {
+          "income": { "type": "number" }
+        }
+      },
+      "governance": {
+        "obligationPolicies": [
+          {
+            "id": "income-change-review-required",
+            "activateWhen": { "on": { "event": "caseFileUpdated" }, "where": "event.field = 'income'" },
+            "satisfyWhen": {
+              "on": { "event": "underwritingReviewCompleted" },
+              "actor": { "role": "underwriter", "notSameAsTriggerActor": true }
+            },
+            "deadline": { "within": "P2BD", "calendarRef": "urn:test:OBL-010" },
+            "responsibleRole": "underwriter",
+            "duplicatePolicy": "ignoreWhilePending",
+            "onViolation": "block"
+          }
+        ]
+      },
+      "execution": {
+        "workflowTimeout": "P90D",
+        "defaultTaskTimeout": "P7D",
+        "instanceVersioning": "pinned"
+      }
+    },
+    "businessCalendar": {
+      "$wosDelivery": "1.0",
+      "targetWorkflow": "urn:test:OBL-010",
+      "calendar": {
+        "version": "federal-fy2026-test-v1.0",
+        "timezone": "UTC",
+        "workWeek": ["monday", "tuesday", "wednesday", "thursday", "friday"],
+        "holidays": [
+          { "name": "Test Holiday Monday", "date": "1970-01-05" }
+        ],
+        "operatingHours": { "start": "09:00", "end": "17:00" }
+      }
+    }
+  },
+  "initial_case_state": {},
+  "event_sequence": [
+    { "event": "caseFileUpdated", "actor": "caseworker", "data": { "field": "income" } }
+  ],
+  "expected_transitions": [
+    { "from": "open", "target": "open", "event": "caseFileUpdated" }
+  ],
+  "expected_provenance": [
+    {
+      "record_kind": "obligationActivated",
+      "data": { "policyId": "income-change-review-required", "obligationId": "income-change-review-required#0" }
+    }
+  ]
+}
