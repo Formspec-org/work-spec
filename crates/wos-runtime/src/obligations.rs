@@ -22,9 +22,11 @@ use time::format_description::well_known::Rfc3339;
 use wos_core::activation::{ActivationContext, evaluate_activation_criteria};
 use wos_core::instance::WorkflowProcess;
 use wos_core::model::obligation::{
-    DuplicatePolicy, ObligationPolicy, ObligationStatus, PendingObligation, ViolationActionKind,
+    DuplicatePolicy, ObligationPolicy, ObligationStatus, ObligationViolationAction,
+    PendingObligation, ViolationActionKind,
 };
 use wos_core::{ActorKind, ProvenanceRecord};
+use wos_events::ObligationViolationWitness;
 
 /// The event being processed, plus the actor and case context an activation
 /// criteria is evaluated against. Borrowed; cheap to construct per drain step.
@@ -79,6 +81,80 @@ impl<'a> ObligationEvent<'a> {
     }
 }
 
+/// A request to materialize a task as the effect of a `createTask` violation
+/// action (WOS-OBL-RUNTIME-0912). The runtime drain realizes it through the
+/// existing task pipeline, linking the task back to `obligation_id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObligationTaskRequest {
+    /// Task-catalog reference from the violation action's `taskRef`.
+    pub task_ref: String,
+    /// The obligation whose violation requested the task.
+    pub obligation_id: String,
+    /// The policy that produced the obligation.
+    pub policy_id: String,
+}
+
+/// The composed effect of one or more violation actions (WOS-OBL-RUNTIME-0908..0913).
+///
+/// `block` / `failed` / `reroute_to` are *gating* outcomes governed by the
+/// strictness ladder (§16.2.4, WOS-OBL-SPEC-0703): when multiple obligations
+/// are violated by a single event, every violation is RECORDED, but only the
+/// strictest gating action takes effect. `create_tasks` / `emit_events` are
+/// *composing* outcomes (`createTask` / `emitEvent`) that accumulate additively
+/// across all violated obligations.
+#[derive(Debug, Default, Clone)]
+pub struct ViolationEffects {
+    /// When `true`, the strictest applied action was `block`; the kernel event
+    /// MUST NOT be applied (Governance §16.2.3 step 4).
+    pub block: bool,
+    /// When `true`, the strictest applied action was `fail`; the operation is
+    /// marked failed rather than silently dropped (WOS-OBL-RUNTIME-0911).
+    pub failed: bool,
+    /// When set, the strictest applied action was `escalate`; the runtime
+    /// reroutes by enqueuing this event name (WOS-OBL-RUNTIME-0910). Defaults to
+    /// `escalated` when the policy declares no `escalateTo`.
+    pub reroute_to: Option<String>,
+    /// Tasks requested by `createTask` actions, in violation order.
+    pub create_tasks: Vec<ObligationTaskRequest>,
+    /// Event names requested by `emitEvent` actions, in violation order.
+    pub emit_events: Vec<String>,
+}
+
+impl ViolationEffects {
+    /// Apply one obligation's violation action to the accumulated effects,
+    /// preserving the strictness ladder for gating actions and accumulating the
+    /// composing actions. `escalate_to` is the policy-declared reroute target.
+    fn apply(&mut self, action: &ObligationViolationAction, request: ObligationTaskRequest) {
+        match action.kind() {
+            ViolationActionKind::Block => self.block = true,
+            ViolationActionKind::Fail => self.failed = true,
+            ViolationActionKind::Escalate => {
+                // Only the first escalate target is retained; a later stricter
+                // gating action (`fail`/`block`) supersedes the reroute below.
+                if self.reroute_to.is_none() {
+                    self.reroute_to = Some(escalate_target(action));
+                }
+            }
+            ViolationActionKind::Warn => {}
+            ViolationActionKind::CreateTask => {
+                let task_ref = action_task_ref(action).unwrap_or(&request.policy_id).to_string();
+                self.create_tasks.push(ObligationTaskRequest { task_ref, ..request });
+            }
+            ViolationActionKind::EmitEvent => {
+                if let Some(event) = action_event(action) {
+                    self.emit_events.push(event.to_string());
+                }
+            }
+        }
+    }
+
+    /// Whether any gating action (`block`/`fail`/`escalate`) is in effect. A
+    /// pure `warn`/`createTask`/`emitEvent` violation leaves the event flowing.
+    pub fn gates(&self) -> bool {
+        self.block || self.failed || self.reroute_to.is_some()
+    }
+}
+
 /// Outcome of the pre-event obligation gate.
 #[derive(Debug, Default)]
 pub struct ObligationGateOutcome {
@@ -86,7 +162,36 @@ pub struct ObligationGateOutcome {
     pub provenance: Vec<ProvenanceRecord>,
     /// When `true`, a pending obligation's `violateWhen` matched with a `block`
     /// action; the kernel event MUST NOT be applied (Governance §16.2.3 step 4).
+    /// Retained as a convenience mirror of [`ViolationEffects::block`].
     pub block: bool,
+    /// Composed effects of every violation matched in this gate pass.
+    pub effects: ViolationEffects,
+}
+
+/// Read the `escalateTo` target from a violation action, defaulting to the
+/// reserved `escalated` event (mirrors the companion-policy reroute target).
+fn escalate_target(action: &ObligationViolationAction) -> String {
+    match action {
+        ObligationViolationAction::Detailed(spec) => spec
+            .escalate_to
+            .clone()
+            .unwrap_or_else(|| "escalated".to_string()),
+        ObligationViolationAction::Shorthand(_) => "escalated".to_string(),
+    }
+}
+
+fn action_task_ref(action: &ObligationViolationAction) -> Option<&str> {
+    match action {
+        ObligationViolationAction::Detailed(spec) => spec.task_ref.as_deref(),
+        ObligationViolationAction::Shorthand(_) => None,
+    }
+}
+
+fn action_event(action: &ObligationViolationAction) -> Option<&str> {
+    match action {
+        ObligationViolationAction::Detailed(spec) => spec.event.as_deref(),
+        ObligationViolationAction::Shorthand(_) => None,
+    }
 }
 
 /// Load the obligation policies declared under `governance.obligationPolicies`.
