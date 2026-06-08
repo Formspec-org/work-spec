@@ -90,6 +90,8 @@ fn check_workflow_fel(doc: &WosDocument, diagnostics: &mut Vec<LintDiagnostic>) 
     check_kernel_fel(doc, diagnostics);
     // Governance embedded block FEL
     check_governance_fel(doc, diagnostics);
+    // Obligation-policy activation criteria FEL (ACT-001, ACT-002)
+    check_obligation_activation_fel(doc, diagnostics);
     // AI integration FEL (agent conditions, deontic expressions)
     check_ai_integration_fel(doc, diagnostics);
     // Advanced governance FEL (equity expressions, SMT constraints)
@@ -135,6 +137,60 @@ fn check_governance_fel(doc: &WosDocument, diagnostics: &mut Vec<LintDiagnostic>
         for (i, delegation) in delegations.iter().enumerate() {
             let base_path = format!("{base_prefix}/{i}");
             check_delegation_conditions(delegation, &base_path, diagnostics);
+        }
+    }
+}
+
+/// ACT-001 + ACT-002: each obligation-policy activation-criteria `where`
+/// expression MUST be valid FEL (ACT-001, hard error) AND its AST root MUST be
+/// boolean-shaped (ACT-002, warning — non-boolean fails activation at runtime
+/// per Governance §16.1.2, mirroring AI-058 for capability preconditions).
+///
+/// Walks `governance.obligationPolicies[*].{activateWhen,satisfyWhen,
+/// cancelWhen,violateWhen}.where`. Referenced criteria (`activationCriteriaRef`)
+/// carry no inline `where` and are skipped here (resolution is ACT-007).
+fn check_obligation_activation_fel(doc: &WosDocument, diagnostics: &mut Vec<LintDiagnostic>) {
+    let Some(policies) = doc
+        .value
+        .pointer("/governance/obligationPolicies")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    const CLAUSES: [&str; 4] = ["activateWhen", "satisfyWhen", "cancelWhen", "violateWhen"];
+    for (i, policy) in policies.iter().enumerate() {
+        for clause in CLAUSES {
+            let Some(expr_str) = policy.pointer(&format!("/{clause}/where")).and_then(Value::as_str)
+            else {
+                continue;
+            };
+            let path = format!("/governance/obligationPolicies/{i}/{clause}/where");
+            match parse(expr_str) {
+                Err(err) => {
+                    diagnostics.push(LintDiagnostic::t2_error(
+                        "ACT-001",
+                        path,
+                        fel_parse_failure_message(
+                            "activation criteria `where` is not valid FEL",
+                            &err,
+                        ),
+                    ));
+                }
+                Ok(expr) => {
+                    if !is_boolean_shaped(&expr) {
+                        diagnostics.push(LintDiagnostic::t2_warning(
+                            "ACT-002",
+                            path,
+                            format!(
+                                "activation criteria `where` `{expr_str}` does not have a \
+                                 boolean-shaped AST root; `where` must evaluate to a boolean \
+                                 (Governance §16.1.2; non-boolean fails activation, no truthy \
+                                 coercion)"
+                            ),
+                        ));
+                    }
+                }
+            }
         }
     }
 }
@@ -1989,5 +2045,77 @@ mod tests {
             parse("$items[?(@.x > 1)]").is_err(),
             "JSONPath filter expressions must not parse as FEL"
         );
+    }
+
+    // --- ACT-001 / ACT-002: obligation-policy activation criteria FEL ---
+
+    fn workflow_with_obligation_where(where_expr: &str) -> WosDocument {
+        make_doc(
+            DocumentKind::Workflow,
+            json!({
+                "$wosWorkflow": true,
+                "governance": {
+                    "obligationPolicies": [{
+                        "id": "p1",
+                        "activateWhen": { "on": { "event": "caseFileUpdated" }, "where": where_expr },
+                        "satisfyWhen": { "on": { "event": "reviewCompleted" } },
+                        "onViolation": "block"
+                    }]
+                }
+            }),
+        )
+    }
+
+    #[test]
+    fn act001_valid_where_is_clean() {
+        let doc = workflow_with_obligation_where("event.field = 'income'");
+        let mut diag = Vec::new();
+        check_obligation_activation_fel(&doc, &mut diag);
+        assert!(diag.is_empty(), "unexpected: {diag:?}");
+    }
+
+    #[test]
+    fn act001_invalid_where_emits_error() {
+        let doc = workflow_with_obligation_where(">>> broken <<<");
+        let mut diag = Vec::new();
+        check_obligation_activation_fel(&doc, &mut diag);
+        assert!(
+            diag.iter().any(|d| d.rule_id == "ACT-001"
+                && d.severity == LintSeverity::Error
+                && d.path == "/governance/obligationPolicies/0/activateWhen/where"),
+            "expected ACT-001 error: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act002_non_boolean_where_emits_warning() {
+        // `caseFile.income` parses but is a bare field ref (non-boolean shape).
+        let doc = workflow_with_obligation_where("caseFile.income");
+        let mut diag = Vec::new();
+        check_obligation_activation_fel(&doc, &mut diag);
+        assert!(
+            diag.iter().any(|d| d.rule_id == "ACT-002"
+                && d.severity == LintSeverity::Warning),
+            "expected ACT-002 warning: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act002_boolean_where_is_clean() {
+        let doc = workflow_with_obligation_where("caseFile.income > caseFile.priorIncome");
+        let mut diag = Vec::new();
+        check_obligation_activation_fel(&doc, &mut diag);
+        assert!(
+            !diag.iter().any(|d| d.rule_id == "ACT-002"),
+            "unexpected ACT-002: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act_no_obligation_policies_is_clean() {
+        let doc = make_doc(DocumentKind::Workflow, json!({ "$wosWorkflow": true }));
+        let mut diag = Vec::new();
+        check_obligation_activation_fel(&doc, &mut diag);
+        assert!(diag.is_empty(), "unexpected: {diag:?}");
     }
 }

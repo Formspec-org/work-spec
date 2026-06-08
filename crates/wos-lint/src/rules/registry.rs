@@ -92,6 +92,31 @@ pub fn all_lint_rules() -> &'static [RuleMetadata] {
 /// code are intentionally absent — the registry describes present reality,
 /// not the normative catalog.
 static ALL_LINT_RULES: &[RuleMetadata] = &[
+    // --- ACT (Activation Criteria / Durable Obligations, ADR 0096) ----
+    RuleMetadata {
+        id: "ACT-001",
+        tier: Tier::T2,
+        severity: LintSeverity::Error,
+        summary: "Obligation-policy activation criteria `where` MUST be valid FEL.",
+        fixtures: &[],
+        graduation: Graduation::Draft,
+        spec_ref: Some("governance/workflow-governance.md#16.1.2"),
+        suggested_fix: Some(
+            "Fix the FEL syntax in the activation criteria `where` expression.",
+        ),
+    },
+    RuleMetadata {
+        id: "ACT-002",
+        tier: Tier::T2,
+        severity: LintSeverity::Warning,
+        summary: "Obligation-policy activation criteria `where` AST root MUST be boolean-shaped (no truthy coercion).",
+        fixtures: &[],
+        graduation: Graduation::Draft,
+        spec_ref: Some("governance/workflow-governance.md#16.1.2"),
+        suggested_fix: Some(
+            "Make `where` a boolean expression (comparison/logical), not a bare field or literal.",
+        ),
+    },
     // --- AG (Advanced Governance) -------------------------------------
     RuleMetadata {
         id: "AG-008",

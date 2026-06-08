@@ -2,6 +2,8 @@
 
 > **Studio-tier rules** (S1–S6, ~65 readiness rules) live in [`studio/STUDIO-LINT-MATRIX.md`](studio/STUDIO-LINT-MATRIX.md). This matrix covers the kernel-envelope tiers (T1 / T2 / T3) only. Studio's lint engine is implemented in `studio/crates/wos-studio-lint/`.
 
+> **Updated 2026-06-08 (ADR 0096 — activation criteria)** — registered T2 rules `ACT-001` (activation criteria `where` MUST be valid FEL) and `ACT-002` (boolean-shaped, mirrors AI-058), implemented in `fel_analysis.rs::check_obligation_activation_fel` over `governance.obligationPolicies[*].{activateWhen,satisfyWhen,cancelWhen,violateWhen}.where`. Both start `draft` (fixtures land with the OBL-* conformance batch, Phase 7). `ACT-003`..`ACT-007` are listed as the normative catalog (`planned`) and not yet registry-backed. fel-core sibling absent in sandbox; CI is authoritative for compilation.
+>
 > **Updated 2026-05-03 (rebase reconcile)** — WS-094 graduations (`WOS-VER-LEVEL-001` → `tested`, `K-031`/`K-032` typed walks under `tier1.rs::transition_actor_and_initial_state_tests`) merged on top of the Studio Stages 3-7 base. K-051/K-053 stay `tested`, K-052 stays `draft`. T1 covers both K-016 (root + compound + region key resolution) and K-032 (root resolution; matrix description carries the broader compound coverage even though the typed function is root-only — gap tracked).
 >
 > **Updated 2026-05-02 (Stage-4 Rust impl)** — `K-051`/`K-052`/`K-053` Rust impl landed via the corrected Stage-4 plan at `thoughts/plans/2026-05-01-stage-4-decision-table-lint-rules.md`. **Wave 0** ships `wos_core::model::decision_table::{DecisionTable, DecisionTableGuard, HitPolicy, Guard}` plus the `Transition.guard` polymorphism refactor + `KernelDocument.decision_tables` field. **Wave 1'** ships `crates/wos-lint/tests/decision_table_fixtures.rs` loading the 10 K-05X conformance fixtures. **Wave 2'** ships `crates/wos-lint/src/rules/decision_table.rs` with K-051/K-052/K-053 implementations + per-rule unit tests. JSONPath shape standardized at `crates/wos-lint/src/diagnostic.rs:104` (slash format, RFC-6901-shaped). All three rules graduated to `tested`. Cargo build + tests SHOULD pass locally where parent `fel-core` is mounted; sandbox cannot verify.
@@ -94,6 +96,13 @@
 
 | ID | Category | Graduation | Summary | Fixture evidence |
 |-----|----------|------------|---------|------------------|
+| `ACT-001` | ACT | draft | Obligation-policy activation criteria `where` MUST be valid FEL. | — |
+| `ACT-002` | ACT | draft | Obligation-policy activation criteria `where` AST root MUST be boolean-shaped (no truthy coercion). | — |
+| `ACT-003` | ACT | planned | Activation trigger `on.event` SHOULD resolve to a known workflow event. | — |
+| `ACT-004` | ACT | planned | Activation `requiredData` paths SHOULD resolve to known case-file fields. | — |
+| `ACT-005` | ACT | planned | Activation/deadline `within` MUST be a valid ISO 8601 / `P<N>BD` duration. | — |
+| `ACT-006` | ACT | planned | Business-day `within` SHOULD declare a resolvable `calendarRef`. | — |
+| `ACT-007` | ACT | planned | `activationCriteriaRef` MUST resolve to a named criteria (no duplicate ids). | — |
 | `AG-008` | AG | draft | Side-effect tools at `autonomous` autonomy MUST declare a `sideEffectPolicy`. | — |
 | `AG-010` | AG | draft | Verifiable constraints MUST satisfy all SMT subset restrictions (parse failures). | — |
 | `AG-011` | AG | draft | `let` bindings in verifiable expressions MUST NOT be recursive. | — |
