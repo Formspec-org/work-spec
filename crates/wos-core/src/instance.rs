@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use stack_common_typeid as typeid;
 
 use crate::model::governance::HoldType;
+use crate::model::obligation::PendingObligation;
 
 fn default_tenant() -> String {
     typeid::DEFAULT_TENANT.to_string()
@@ -462,6 +463,12 @@ pub struct GovernanceState {
     /// Review protocol state (keyed by binding ID).
     #[serde(default)]
     pub review_state: HashMap<String, serde_json::Value>,
+    /// Durable pending obligations (ADR 0096; WOS-OBL-MODEL-0803).
+    ///
+    /// Default-empty so process JSON written before this field existed
+    /// deserializes unchanged and round-trips without the key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_obligations: Vec<PendingObligation>,
 }
 
 /// An active delegation.
