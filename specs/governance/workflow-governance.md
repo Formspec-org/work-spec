@@ -877,6 +877,137 @@ Lint rule **G-064 `assertion-library-resolution`** checks that: (a) every `asser
 
 ---
 
+## 16. Activation Criteria and Durable Obligations
+
+This section is normative. It introduces two WOS-native primitives per [ADR 0096](../../thoughts/adr/0096-shared-activation-criteria-and-durable-obligations.md): a reusable **`ActivationCriteria`** shape ("when does this become active?") and durable **obligation policies** (`ObligationPolicy` → `PendingObligation`, "once active: what must happen, by when, by whom, and what if it does not?"). These are WOS-native semantics over events, time, actors, and provenance. They are **not** temporal logic: FEL gains no `G`/`F`/`U` or other temporal operators (ADR 0096 D-1; Kernel §7.4). The structure follows the three-section authoring rubric: §16.1–§16.2 are the Normative Contract, §16.3 is Composition, §16.4 is Conformance.
+
+### 16.1 Activation Criteria (Normative Contract)
+
+#### 16.1.1 Overview
+
+An `ActivationCriteria` (`$defs/ActivationCriteria`) is a reusable predicate composing five optional clauses: a trigger (`on`), an actor constraint (`actor`), required-data presence paths (`requiredData`), an FEL boolean guard (`where`), and a deadline window (`within` + `calendarRef`). At least one clause MUST be present. It is referenced by obligation policies (§16.2) and MAY, additively, be offered by milestones, task SLAs (§10.3), holds (§12), DCR activities, and agent capability preconditions (§16.3).
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `on` | `ActivationTrigger` | OPTIONAL | Event/transition trigger: `event` (exact kernel event name), `eventTag`, `eventKind` (`message`\|`signal`\|`timer`\|`error`\|`condition`), or `transitionTag`. At least one trigger field when `on` is present. |
+| `where` | FEL string | OPTIONAL | Local boolean guard over `caseFile`/`event`/`actor`/`context`. MUST be boolean. |
+| `actor` | `ActorConstraint` | OPTIONAL | `actorId`, `role`, `actorType`, and `notSameAsTriggerActor`. |
+| `requiredData` | array of path | OPTIONAL | Paths that MUST be present and non-null. |
+| `within` | duration | OPTIONAL | Deadline window (ISO 8601; `P<N>BD` = N business days). Surfaced as a deadline hint; does not itself schedule a timer. |
+| `calendarRef` | URI | OPTIONAL | Business Calendar sidecar for `P<N>BD` resolution. |
+| `id`, `description` | string | OPTIONAL | Trace metadata; `id` becomes a library key only when targeted by an `activationCriteriaRef`. |
+
+#### 16.1.2 Evaluation semantics
+
+A processor evaluates an `ActivationCriteria` against an activation context (the event, its data, the acting actor's id/roles/type, the case state, the firing transition's tags, and the current time) **deterministically in this order**, short-circuiting on the first failing clause:
+
+1. **Trigger.** If `on` is present, the event (or firing transition) MUST match every declared trigger field; otherwise the criteria does not match.
+2. **Actor.** If `actor` is present, the acting actor MUST satisfy `actorId`/`role`/`actorType`. `notSameAsTriggerActor` is evaluated only in a satisfaction/violation context where a triggering actor was recorded (§16.2.2); on `activateWhen` it is ignored.
+3. **Required data.** If `requiredData` is present, every path MUST resolve to a present, non-null value. Resolution is a simple dotted-path lookup, not FEL: missing fails, null fails, present-non-null passes.
+4. **Guard.** If `where` is present, the FEL expression MUST evaluate to boolean `true`. A non-boolean result or an evaluation error MUST fail activation — truthiness MUST NOT decide governance, and the result MUST NOT be coerced. (This mirrors the transition-guard non-boolean rejection rule, Kernel §4.6/§4.7, and lint AI-058 boolean shape; here applied as ACT-002.)
+5. **Deadline hint.** If `within` is present and all prior clauses matched, the evaluator returns the duration and any `calendarRef` as a deadline hint for the consuming surface. The evaluator does not schedule timers.
+
+Activation evaluation alone does not mutate workflow state. State effects belong to the consuming surface (an obligation policy creates a `PendingObligation`; a milestone fires; etc.).
+
+#### 16.1.3 Evaluation trace
+
+A processor MAY emit an activation-evaluation trace for debuggability. When emitted, the trace is deterministic and distinguishes three outcomes — **no-match**, **match**, **error** — and records: the criteria `id` (if any), the matched event, the actor-match result, the required-data result, and the FEL result. The trace is observational; it does not alter the activation outcome.
+
+#### 16.1.4 Inline and referenced criteria
+
+A consuming site MAY supply an `ActivationCriteria` inline or reference a named one via `activationCriteriaRef` (`$defs/ActivationCriteriaRef`). Inline and reference forms are mutually exclusive at a single site. **Reference resolution happens at load/lint time, not lazily at runtime.** An unresolved reference is a load-time/lint rejection (ACT-007), never silently ignored. Duplicate criteria `id`s are rejected or warned per profile. An inline `id` is trace metadata only and is not a library lookup unless explicitly referenced.
+
+### 16.2 Obligation Policies (Normative Contract)
+
+#### 16.2.1 Overview and properties
+
+An `ObligationPolicy` (`$defs/ObligationPolicy`, authored under `governance.obligationPolicies[]`) declares a durable, future-tense, cross-event duty. Each of its `activateWhen`/`satisfyWhen`/`cancelWhen`/`violateWhen` clauses is an `ActivationCriteria` (§16.1).
+
+| Property | Type | Required | Description |
+|----------|------|----------|-------------|
+| `id` | string | REQUIRED | Policy identifier, unique within the governance block. |
+| `activateWhen` | `ActivationCriteria` | REQUIRED | Creates a `PendingObligation` when matched. |
+| `satisfyWhen` | `ActivationCriteria` | REQUIRED | Discharges a pending obligation when matched. |
+| `cancelWhen` | `ActivationCriteria` | OPTIONAL | Cancels a pending obligation (no longer blocks or expires). |
+| `violateWhen` | `ActivationCriteria` | OPTIONAL | An event that violates the obligation if it occurs while pending; checked before the kernel event is applied so `block` can prevent it. |
+| `deadline` | `ObligationDeadline` | OPTIONAL | Schedules a deadline timer; expiry violates per `onViolation`. |
+| `responsibleActor` / `responsibleRole` | string | OPTIONAL | Accountable party. |
+| `duplicatePolicy` | enum | OPTIONAL | `createEachTime` \| `ignoreWhilePending` (default) \| `replaceExisting` \| `coalesceByKey`. |
+| `correlationKey` | FEL string | REQUIRED iff `coalesceByKey` | Coalescing key. |
+| `onViolation` | `ObligationViolationAction` | REQUIRED | Action on violation (§16.2.3). |
+
+#### 16.2.2 Lifecycle
+
+A `PendingObligation` has the lifecycle:
+
+```text
+inactive ──activateWhen──▶ pending ──satisfyWhen──▶ satisfied (terminal)
+                             │
+                             ├──cancelWhen──────────▶ cancelled (terminal)
+                             ├──violateWhen─────────▶ violated  (terminal)
+                             └──deadline expiry─────▶ expired   (terminal)
+                             └──authorized bypass───▶ bypassed  (terminal)
+```
+
+- States: `pending` (active duty), and terminal states `satisfied`, `violated`, `cancelled`, `expired`, `bypassed`. `inactive` is the pre-activation absence of any pending obligation.
+- Legal transitions are exactly those shown; a terminal obligation MUST NOT transition further. A satisfied/cancelled obligation MUST NOT subsequently block or expire (its deadline timer is cancelled — §16.3, Timers).
+- **Triggering actor.** On activation the processor records the activating actor; `satisfyWhen.actor.notSameAsTriggerActor` is evaluated against it (separation of duties).
+- **Duplicate activation.** When `activateWhen` matches while an obligation from the same policy is already `pending`, `duplicatePolicy` governs: `createEachTime` creates an additional pending obligation; `ignoreWhilePending` does not duplicate; `replaceExisting` cancels and replaces the existing one; `coalesceByKey` coalesces obligations sharing the resolved `correlationKey`. The ignored/replaced/coalesced outcome is recorded in provenance.
+
+#### 16.2.3 Event processing order
+
+A processor MUST evaluate obligations within its event loop in this deterministic order (the WOS in-memory reference realizes this inside `drain_once`):
+
+1. Materialize due timers (including obligation deadline timers).
+2. Dequeue the pending event.
+3. Evaluate companion-policy decisions (existing behavior).
+4. Evaluate **pending-obligation pre-gates**: check each pending obligation's `violateWhen` against the event *before* the kernel processes it. A `block` action prevents the kernel event from being applied.
+5. Process the kernel event if not blocked.
+6. Evaluate **new activations, satisfactions, and cancellations** against the post-event context (after kernel/provenance context is available), alongside milestone firing.
+7. Apply violation actions and any resulting tasks/events.
+8. Persist obligation state and append provenance.
+
+Obligations are evaluated in document order (policies) and activation order (pending obligations); provenance order is deterministic. Replaying the same event stream MUST yield identical final obligation state and identical provenance order (idempotency-token replay does not duplicate activations).
+
+#### 16.2.4 Violation action precedence
+
+When a violation fires, the configured `onViolation` action applies: `warn` records and proceeds; `escalate` reroutes to the configured escalation; `fail` fails the current operation; `block` prevents the offending kernel event; `createTask` creates a governance task linked to the obligation; `emitEvent` emits a named event. When multiple policies are violated by the same event, **all** violations are recorded in provenance, but the **strictest** effective action wins, ordered:
+
+```text
+warn < escalate < fail < block
+```
+
+`createTask`/`emitEvent` compose additively with the strictest blocking-class action (the task/event is still created/emitted, and the strictest gate still applies).
+
+#### 16.2.5 Bypass
+
+A pending obligation MAY be bypassed only by an authorized actor supplying a structured rationale. Bypass is scoped to a single obligation (or a single event), not a permanent mutation of the policy. **Agents MUST NOT bypass by default** (ADR 0096; WOS-INTEG-AI-1706); an agent bypass attempt is recorded as a violation/tamper provenance record. Runtime actors MUST NOT mutate an obligation policy; policy change flows only through a workflow-definition update/migration.
+
+### 16.3 Composition
+
+- **Kernel seams.** Obligation policies attach via the `lifecycleHook` seam (the monitor observes events and may gate them, like the kernel statechart firing inside a transition) and emit through the `provenanceLayer` seam. No new kernel seam is introduced (ADR 0096 D-3).
+- **Holds (§12), SLAs (§10.3), milestones.** These keep their existing trigger fields (`resumeTrigger`, `startAt`, `condition`). `ActivationCriteria` is offered as an optional, additive alternative on these surfaces; no migration is forced.
+- **DCR constraint zones.** Zone-local flexible-activity sequencing remains DCR (Advanced §4). Cross-state / cross-actor / cross-task durable duties use obligation policies. An optional DCR-response → obligation bridge is an integration, off by default.
+- **Deontic obligations vs. policy-engine obligations vs. obligation policies.** The word "obligation" denotes three distinct concepts; the distinction is normative:
+
+  | Concept | Canonical name | Layer | Temporality |
+  |---|---|---|---|
+  | AI deontic constraint | **deontic `Obligation`** (`agents[].deontic.obligations`) | author-time AI block / runtime deontic eval | immediate, pre-commit on agent output |
+  | Policy-engine directive | **policy-engine obligation** (`PolicyDecision.obligations[]`) | runtime integration boundary | per-decision directive |
+  | Durable workflow duty | **`ObligationPolicy` / `PendingObligation`** | `governance.obligationPolicies[]` / governance state | durable, future-tense |
+
+  The bare noun `Obligation` is reserved for the deontic constraint. The durable concept is always written with its two-word form. Policy-engine obligations MAY be recorded only, or — when explicitly configured with a mapping/template — materialized into pending obligations; an `indeterminate` policy decision is never coerced into an obligation.
+- **Trellis boundary.** Obligation lifecycle records are WOS provenance only; anchoring/export/sealing is Trellis-side via `custodyHook`. WOS does not create a second proof substrate.
+
+### 16.4 Conformance
+
+- **Static analysis (lint).** The `ACT-*` family validates activation criteria: `ACT-001` (`where` parses as FEL), `ACT-002` (`where` is boolean-shaped), `ACT-003` (trigger event resolves), `ACT-004` (`requiredData` paths resolve), `ACT-005` (`within` is a valid duration), `ACT-006` (`calendarRef` present/resolves for business durations), `ACT-007` (`activationCriteriaRef` resolves). Obligation authoring lints check unreachable satisfaction and impossible violation actions (`taskRef`/event resolution).
+- **Runtime conformance.** The `OBL-*` fixture family exercises activation→pending (OBL-001), no-activation-when-FEL-false (OBL-002), satisfaction (OBL-003), violation-before-blocks (OBL-004), deadline-expiry-violates (OBL-005), cancellation (OBL-006), actor-role mismatch (OBL-007), duplicate `ignoreWhilePending` (OBL-008), replay determinism (OBL-009), and business-calendar deadlines (OBL-010), among others.
+- **Three-way agreement.** Every obligation MUST is exercised against the in-memory reference adapter via these fixtures and MUST remain implementable in the production (Restate) adapter; the reference and production adapters agree with this spec.
+- **Fail-closed.** A processor that does not support obligation policies MUST fail closed for `rightsImpacting` / `safetyImpacting` workflows that declare them; operational/informational workflows MAY warn. The default is overridable only explicitly.
+
+---
+
 ## References
 
 ### Normative References
