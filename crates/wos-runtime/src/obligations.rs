@@ -26,8 +26,140 @@ use wos_core::model::obligation::{
     DuplicatePolicy, ObligationPolicy, ObligationStatus, ObligationViolationAction,
     PendingObligation, ViolationActionKind,
 };
+use wos_core::model::kernel::ImpactLevel;
 use wos_core::{ActorKind, ProvenanceRecord};
 use wos_events::ObligationViolationWitness;
+
+/// Default safety cap on the number of *pending* obligations a single process
+/// may hold concurrently (WOS-PERF-2802). A malformed policy set or an
+/// activation loop could otherwise materialize pending obligations without
+/// bound, exhausting process state. The cap is deliberately generous: real
+/// workflows hold a handful of concurrent duties, so any process approaching
+/// this count is almost certainly misbehaving. Override via
+/// [`ObligationMonitorConfig::max_pending`].
+pub const DEFAULT_MAX_PENDING_OBLIGATIONS: usize = 1024;
+
+/// Tunable safety limits for the obligation monitor (WOS-PERF-2802).
+///
+/// Additive: every field has a default that preserves pre-cap behavior for the
+/// realistic workload (the cap is only reached by a runaway policy set), so
+/// existing callers that pass [`ObligationMonitorConfig::default`] see no
+/// behavioral change. The struct is `Copy` and cheap to thread per drain step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObligationMonitorConfig {
+    /// Maximum number of `Pending` obligations a process may hold at once.
+    /// When activation would push the count past this bound it is refused and a
+    /// deterministic `ObligationWarning` is emitted instead of a new pending row.
+    pub max_pending: usize,
+}
+
+impl Default for ObligationMonitorConfig {
+    fn default() -> Self {
+        Self {
+            max_pending: DEFAULT_MAX_PENDING_OBLIGATIONS,
+        }
+    }
+}
+
+/// Whether obligation support is engaged for a workflow, and the fail-closed
+/// posture to take when it is not (WOS-MIG-2604).
+///
+/// A workflow that declares `obligationPolicies` but runs on a processor where
+/// obligation support is disabled or of unknown version MUST NOT silently drop
+/// the duties: for a rights-/safety-impacting workflow the conservative posture
+/// is to fail closed (block the event and escalate); operational/informational
+/// workflows may proceed with a warning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObligationSupportPosture {
+    /// Support is present; the monitor runs normally.
+    Supported,
+    /// Support is absent and the impact level is rights-/safety-impacting:
+    /// block the event and emit a configuration violation (fail closed).
+    FailClosed,
+    /// Support is absent but the impact level is operational/informational:
+    /// proceed, emitting a configuration warning.
+    WarnOnly,
+}
+
+/// Decide the fail-closed posture for a workflow that declares obligation
+/// policies given whether the processor supports obligations (WOS-MIG-2604).
+///
+/// `supported == true` always yields [`ObligationSupportPosture::Supported`].
+/// When support is absent, a rights-/safety-impacting workflow fails closed and
+/// everything else warns. This is a pure decision function so it is testable in
+/// isolation and reusable by any adapter that must gate on its own capability.
+pub fn obligation_support_posture(
+    impact_level: ImpactLevel,
+    supported: bool,
+) -> ObligationSupportPosture {
+    if supported {
+        ObligationSupportPosture::Supported
+    } else if impact_level.requires_due_process() {
+        ObligationSupportPosture::FailClosed
+    } else {
+        ObligationSupportPosture::WarnOnly
+    }
+}
+
+/// Outcome of the unsupported-feature guard (WOS-MIG-2604).
+#[derive(Debug, Default)]
+pub struct ObligationSupportGate {
+    /// Provenance witnessing the unsupported declaration (warning or violation).
+    pub provenance: Vec<ProvenanceRecord>,
+    /// When `true`, the event MUST NOT be applied (rights/safety fail-closed).
+    pub block: bool,
+}
+
+/// Fail-closed guard run at the monitor entry when a workflow declares
+/// obligation policies but the processor cannot honor them (WOS-MIG-2604).
+///
+/// Returns an empty (non-blocking) gate when there are no policies or support
+/// is present. Otherwise emits a deterministic configuration record per policy:
+/// a blocking `ObligationViolated` for rights/safety workflows, or a
+/// non-blocking `ObligationWarning` for operational/informational ones. The
+/// records are PII-free (policy id only), so they are safe to persist verbatim.
+pub fn evaluate_obligation_support_gate(
+    policies: &[ObligationPolicy],
+    impact_level: ImpactLevel,
+    supported: bool,
+) -> ObligationSupportGate {
+    let mut gate = ObligationSupportGate::default();
+    if policies.is_empty() {
+        return gate;
+    }
+    match obligation_support_posture(impact_level, supported) {
+        ObligationSupportPosture::Supported => {}
+        ObligationSupportPosture::FailClosed => {
+            gate.block = true;
+            for policy in policies {
+                gate.provenance.push(ProvenanceRecord::obligation_violated(
+                    &policy.id,
+                    &policy.id,
+                    "obligation support unavailable on this processor; failing closed (WOS-MIG-2604)",
+                    "block",
+                    ObligationViolationWitness {
+                        trigger_event: None,
+                        deadline: None,
+                        responsible_actor: None,
+                        responsible_role: None,
+                        event_witness: None,
+                        case_state_witness: None,
+                    },
+                ));
+            }
+        }
+        ObligationSupportPosture::WarnOnly => {
+            for policy in policies {
+                gate.provenance.push(ProvenanceRecord::obligation_warning(
+                    &policy.id,
+                    &policy.id,
+                    "unsupported",
+                ));
+            }
+        }
+    }
+    gate
+}
 
 /// The event being processed, plus the actor and case context an activation
 /// criteria is evaluated against. Borrowed; cheap to construct per drain step.
@@ -430,10 +562,19 @@ pub fn evaluate_deadline_warnings(
 
 /// Post-event: for each policy whose `activateWhen` matches, create a pending
 /// obligation (subject to `duplicatePolicy`) and emit `ObligationActivated`.
+///
+/// Policies are evaluated in document order, so the resulting provenance and
+/// the pending-obligation push order are deterministic across drains
+/// (WOS-PERF-2803). The number of concurrently `Pending` obligations is bounded
+/// by `config.max_pending` (WOS-PERF-2802): once the cap is reached an otherwise
+/// matching activation does NOT create a new pending obligation; a deterministic
+/// `ObligationWarning` is emitted in its place so the audit trail records the
+/// refusal.
 pub fn evaluate_activations(
     policies: &[ObligationPolicy],
     instance: &mut WorkflowProcess,
     ev: &ObligationEvent<'_>,
+    config: ObligationMonitorConfig,
 ) -> Vec<ProvenanceRecord> {
     let mut records = Vec::new();
     for policy in policies {
@@ -486,6 +627,25 @@ pub fn evaluate_activations(
                 }
             }
             _ => {}
+        }
+
+        // Safety cap (WOS-PERF-2802): refuse activation once the process already
+        // holds `max_pending` Pending obligations. The refusal is deterministic
+        // (depends only on current pending count) and witnessed by a warning so
+        // the cap event is auditable. A `ReplaceExisting` policy cancelled rows
+        // above, lowering the count, so this is checked after that pass.
+        let pending_total = governance
+            .pending_obligations
+            .iter()
+            .filter(|o| o.status == ObligationStatus::Pending)
+            .count();
+        if pending_total >= config.max_pending {
+            records.push(ProvenanceRecord::obligation_warning(
+                &policy.id,
+                &policy.id,
+                "maxPendingObligationsExceeded",
+            ));
+            continue;
         }
 
         // Deterministic obligation id: policy id + count of all obligations
@@ -696,6 +856,151 @@ pub fn bypass_obligation(
         },
     );
     BypassOutcome::Bypassed(vec![record])
+}
+
+/// Authorization seam for privileged obligation operations (WOS-SEC-2701).
+///
+/// WOS-runtime has no general `AccessControl`-style hook wired into the
+/// obligation monitor (the kernel `AccessControl` trait gates transitions and
+/// field reads, not obligation administration), so the monitor carries its own
+/// minimal, default-deny authorizer for the two privileged escape hatches:
+/// administrative bypass and deadline extension. The default implementation
+/// ([`DefaultObligationAuthorizer`]) encodes the policy floor:
+///
+/// - an **agent** actor is NEVER authorized (mirrors WOS-INTEG-AI-1706);
+/// - a **human/system** actor is authorized only when it carries the
+///   `obligation-admin` role (admins / supervisors); everything else is denied.
+///
+/// Hosts may supply a stricter authorizer (e.g. one that consults OpenFGA) but
+/// MUST NOT loosen the agent floor.
+pub trait ObligationAuthorizer {
+    /// Whether `actor` may bypass / extend the given obligation. `actor_roles`
+    /// is the acting actor's role set; `actor_type` its kind.
+    fn authorize(
+        &self,
+        obligation_id: &str,
+        actor_id: Option<&str>,
+        actor_type: Option<ActorKind>,
+        actor_roles: &[String],
+    ) -> bool;
+}
+
+/// Role that grants administrative authority over obligations (bypass/extend).
+pub const OBLIGATION_ADMIN_ROLE: &str = "obligation-admin";
+
+/// Default obligation authorizer: agents are always denied; humans/systems are
+/// allowed only when they carry [`OBLIGATION_ADMIN_ROLE`] (WOS-SEC-2701).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DefaultObligationAuthorizer;
+
+impl ObligationAuthorizer for DefaultObligationAuthorizer {
+    fn authorize(
+        &self,
+        _obligation_id: &str,
+        _actor_id: Option<&str>,
+        actor_type: Option<ActorKind>,
+        actor_roles: &[String],
+    ) -> bool {
+        if actor_type == Some(ActorKind::Agent) {
+            return false;
+        }
+        actor_roles.iter().any(|r| r == OBLIGATION_ADMIN_ROLE)
+    }
+}
+
+/// Outcome of an attempted authorized deadline extension (WOS-OBL-TIME-1008).
+#[derive(Debug)]
+pub enum ExtensionOutcome {
+    /// The deadline was extended by an authorized actor; carries the emitted
+    /// provenance recording the old and new deadline.
+    Extended(Vec<ProvenanceRecord>),
+    /// The extension was refused (unauthorized actor / agent); the obligation is
+    /// untouched and the returned records witness the refused attempt.
+    Refused(Vec<ProvenanceRecord>),
+    /// No pending obligation with that id was found; no state change.
+    NotFound,
+}
+
+/// Authorized extension of a pending obligation's deadline (WOS-OBL-TIME-1008),
+/// routed through an [`ObligationAuthorizer`] (WOS-SEC-2701).
+///
+/// On success the pending obligation's `deadline` is replaced with `new_deadline`
+/// and an `ObligationWarning`-shaped record witnesses the change with both the
+/// old and new deadlines (so the audit trail shows who extended what). An
+/// unauthorized attempt (agent, or a human lacking the admin role) is refused and
+/// witnessed as a violation; the obligation keeps its original deadline.
+pub fn extend_obligation_deadline(
+    instance: &mut WorkflowProcess,
+    obligation_id: &str,
+    new_deadline: &str,
+    actor_id: Option<&str>,
+    actor_type: Option<ActorKind>,
+    actor_roles: &[String],
+    authorizer: &dyn ObligationAuthorizer,
+) -> ExtensionOutcome {
+    let idx = instance.governance_state.as_ref().and_then(|g| {
+        g.pending_obligations.iter().position(|o| {
+            o.obligation_id == obligation_id && o.status == ObligationStatus::Pending
+        })
+    });
+    let Some(i) = idx else {
+        return ExtensionOutcome::NotFound;
+    };
+    let (policy_id, _oid, _trigger) = match pending_snapshot(instance, i) {
+        Some(s) => s,
+        None => return ExtensionOutcome::NotFound,
+    };
+    let (old_deadline, responsible_actor, responsible_role) =
+        obligation_witness_fields(instance, i);
+
+    if !authorizer.authorize(obligation_id, actor_id, actor_type, actor_roles) {
+        let record = ProvenanceRecord::obligation_violated(
+            &policy_id,
+            obligation_id,
+            "unauthorized actor attempted to extend an obligation deadline (refused; WOS-SEC-2701)",
+            "block",
+            ObligationViolationWitness {
+                trigger_event: None,
+                deadline: old_deadline.as_deref(),
+                responsible_actor: actor_id.or(responsible_actor.as_deref()),
+                responsible_role: responsible_role.as_deref(),
+                event_witness: None,
+                case_state_witness: None,
+            },
+        );
+        return ExtensionOutcome::Refused(vec![record]);
+    }
+
+    // Authorized: update the deadline in place and witness old → new.
+    if let Some(g) = instance.governance_state.as_mut() {
+        if let Some(o) = g.pending_obligations.get_mut(i) {
+            o.deadline = Some(new_deadline.to_string());
+        }
+    }
+    let mut record = ProvenanceRecord::obligation_warning(
+        &policy_id,
+        obligation_id,
+        "deadlineExtended",
+    );
+    if let Some(data) = record.data.as_mut().and_then(|d| d.as_object_mut()) {
+        if let Some(old) = &old_deadline {
+            data.insert(
+                "previousDeadline".to_string(),
+                Value::String(old.clone()),
+            );
+        }
+        data.insert(
+            "newDeadline".to_string(),
+            Value::String(new_deadline.to_string()),
+        );
+        if let Some(actor) = actor_id {
+            data.insert(
+                "extendedBy".to_string(),
+                Value::String(actor.to_string()),
+            );
+        }
+    }
+    ExtensionOutcome::Extended(vec![record])
 }
 
 // ── Internal helpers (snapshot-then-mutate to keep borrows disjoint) ────────
