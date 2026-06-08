@@ -16,6 +16,8 @@
 //! (WOS-OBL-TIME-*) are layered on top of this module by the timer path.
 
 use serde_json::Value;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use wos_core::activation::{ActivationContext, evaluate_activation_criteria};
 use wos_core::instance::WorkflowProcess;
@@ -208,6 +210,16 @@ pub fn evaluate_activations(
             .count();
         let obligation_id = format!("{}#{}", policy.id, seq);
 
+        // Deadline timestamp (WOS-OBL-TIME-1001): computed from the activation
+        // time + `deadline.within` for wall-clock durations. Business-day
+        // (`P<N>BD`) deadlines need a business calendar and are left for the
+        // calendar-aware timer path (WOS-OBL-TIME-1002); timer scheduling +
+        // expiry firing are WOS-OBL-TIME-1003/1004.
+        let deadline = policy
+            .deadline
+            .as_ref()
+            .and_then(|d| compute_deadline_iso(ev.now_ms, &d.within));
+
         governance.pending_obligations.push(PendingObligation {
             obligation_id: obligation_id.clone(),
             policy_id: policy.id.clone(),
@@ -215,9 +227,7 @@ pub fn evaluate_activations(
             trigger_event: Some(ev.event_name.to_string()),
             trigger_actor_id: ev.actor_id.map(str::to_string),
             activated_at: ev.now_iso.to_string(),
-            // Deadline timer scheduling is layered by the timer path
-            // (WOS-OBL-TIME-*); the deadline timestamp is populated there.
-            deadline: None,
+            deadline,
             responsible_actor: policy.responsible_actor.clone(),
             responsible_role: policy.responsible_role.clone(),
             correlation_key: None,
@@ -335,6 +345,25 @@ fn set_status(instance: &mut WorkflowProcess, i: usize, status: ObligationStatus
             o.status = status;
         }
     }
+}
+
+/// Compute an obligation deadline timestamp from the activation time and a
+/// `within` duration. Returns `None` for durations the wall-clock parser
+/// rejects (notably the business-day `P<N>BD` form, which requires a calendar).
+fn compute_deadline_iso(now_ms: u64, within: &str) -> Option<String> {
+    let duration_ms = wos_core::parse_iso_duration_to_ms(within).ok()?;
+    format_ms_to_iso(now_ms.checked_add(duration_ms)?)
+}
+
+/// Format epoch milliseconds as an RFC 3339 timestamp (mirrors the runtime's
+/// `format_timestamp`, which is not visible from this sibling module).
+fn format_ms_to_iso(ms: u64) -> Option<String> {
+    let nanos = i128::from(ms).checked_mul(1_000_000)?;
+    let nanos_i64 = i64::try_from(nanos).ok()?;
+    OffsetDateTime::from_unix_timestamp_nanos(i128::from(nanos_i64))
+        .ok()?
+        .format(&Rfc3339)
+        .ok()
 }
 
 fn violation_action_str(action: ViolationActionKind) -> &'static str {
@@ -559,5 +588,46 @@ mod tests {
         let outcome = evaluate_pre_event_gate(&policies, &mut inst, &ev);
         assert!(!outcome.block);
         assert!(outcome.provenance.is_empty());
+    }
+
+    fn policy_with_deadline(within: &str) -> Vec<ObligationPolicy> {
+        policies_from(serde_json::json!({
+            "obligationPolicies": [{
+                "id": "p-deadline",
+                "activateWhen": { "on": { "event": "started" } },
+                "satisfyWhen": { "on": { "event": "done" } },
+                "deadline": { "within": within },
+                "onViolation": "block"
+            }]
+        }))
+    }
+
+    #[test]
+    fn activation_computes_wall_clock_deadline() {
+        let policies = policy_with_deadline("P2D");
+        let mut inst = bare_instance();
+        let cs = serde_json::json!({});
+        // now_ms = 0 (epoch) + 2 days → 1970-01-03T00:00:00Z.
+        let ev = event("started", None, &cs, None, &[]);
+        evaluate_activations(&policies, &mut inst, &ev);
+        let o = &inst.governance_state.as_ref().unwrap().pending_obligations[0];
+        assert_eq!(o.deadline.as_deref(), Some("1970-01-03T00:00:00Z"));
+    }
+
+    #[test]
+    fn activation_leaves_business_day_deadline_uncomputed() {
+        // `P5BD` needs a business calendar; the wall-clock path returns None.
+        let policies = policy_with_deadline("P5BD");
+        let mut inst = bare_instance();
+        let cs = serde_json::json!({});
+        let ev = event("started", None, &cs, None, &[]);
+        evaluate_activations(&policies, &mut inst, &ev);
+        let o = &inst.governance_state.as_ref().unwrap().pending_obligations[0];
+        assert!(o.deadline.is_none());
+    }
+
+    #[test]
+    fn format_ms_to_iso_epoch() {
+        assert_eq!(format_ms_to_iso(0).as_deref(), Some("1970-01-01T00:00:00Z"));
     }
 }
