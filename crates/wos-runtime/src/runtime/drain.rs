@@ -14,9 +14,12 @@ use wos_core::{ActorKind, ProvenanceKind, ProvenanceRecord};
 
 use crate::milestones::evaluate_milestones;
 use crate::obligations::{
-    ObligationEvent, evaluate_activations, evaluate_cancellations, evaluate_pre_event_gate,
-    evaluate_satisfactions, load_obligation_policies,
+    ObligationEvent, ObligationTaskRequest, ViolationEffects, evaluate_activations,
+    evaluate_cancellations, evaluate_deadline_expiries, evaluate_deadline_warnings,
+    evaluate_pre_event_gate, evaluate_satisfactions, load_obligation_policies,
 };
+
+use wos_core::instance::{ActiveTask, ActiveTaskStatus, PendingEvent, WorkflowProcess};
 
 use super::timers::{
     annotate_timer_created_with_calendar_version, annotate_timer_created_with_convergence_error,
@@ -24,7 +27,7 @@ use super::timers::{
 };
 use super::{
     DrainOnceResult, RuntimeError, RuntimeEventContext, WosRuntime, compensation_provenance,
-    format_timestamp, populate_provenance_record_fields, stamp_provenance,
+    format_timestamp, make_task_id, populate_provenance_record_fields, stamp_provenance,
 };
 
 /// Resolve an event actor's kind from the kernel actor registry, for
@@ -34,6 +37,87 @@ use super::{
 fn resolve_actor_kind(kernel: &KernelDocument, actor_id: Option<&str>) -> Option<ActorKind> {
     let id = actor_id?;
     kernel.actors.iter().find(|a| a.id == id).map(|a| a.kind)
+}
+
+/// Realize the *composing* violation effects of an obligation gate or expiry
+/// pass (WOS-OBL-RUNTIME-0912/0913): materialize one `Created` task per
+/// `createTask` request (linked back to the obligation) and enqueue one pending
+/// event per `emitEvent` request. The gating effects (`block`/`fail`/`escalate`)
+/// are handled by the drain caller, which controls whether the kernel event is
+/// applied. Returns `(created_task_ids, emitted_event_names, provenance)`.
+fn realize_obligation_effects(
+    process: &mut WorkflowProcess,
+    effects: &ViolationEffects,
+    actor_id: Option<&str>,
+    impact_level: Option<wos_core::ImpactLevel>,
+    now_iso: &str,
+) -> (Vec<String>, Vec<String>, Vec<ProvenanceRecord>) {
+    let mut created_task_ids = Vec::new();
+    let mut emitted_events = Vec::new();
+    let mut provenance = Vec::new();
+
+    for ObligationTaskRequest {
+        task_ref,
+        obligation_id,
+        policy_id,
+    } in &effects.create_tasks
+    {
+        let task_sequence = process.next_task_sequence + 1;
+        process.next_task_sequence = task_sequence;
+        let task_id = make_task_id(&process.process_id, task_sequence, task_ref);
+        let mut task = ActiveTask {
+            task_id: task_id.clone(),
+            task_ref: task_ref.clone(),
+            status: ActiveTaskStatus::Created,
+            assigned_actor: None,
+            contract_ref: None,
+            binding: None,
+            definition_url: None,
+            definition_version: None,
+            prefill_mapping_ref: None,
+            response_mapping_ref: None,
+            deadline: None,
+            impact_level,
+            context: None,
+            last_validation_outcome: None,
+            created_at: now_iso.to_string(),
+            updated_at: now_iso.to_string(),
+            extensions: Default::default(),
+        };
+        // Link the task to the obligation that requested it (WOS-OBL-RUNTIME-0912).
+        task.extensions.insert(
+            "x-wos-obligation-id".to_string(),
+            serde_json::Value::String(obligation_id.clone()),
+        );
+        task.extensions.insert(
+            "x-wos-obligation-policy-id".to_string(),
+            serde_json::Value::String(policy_id.clone()),
+        );
+        provenance.push(ProvenanceRecord::task_lifecycle(
+            ProvenanceKind::TaskCreated,
+            &task_id,
+            actor_id,
+            Some(serde_json::json!({
+                "taskRef": task_ref,
+                "obligationId": obligation_id,
+            })),
+        ));
+        process.active_tasks.push(task);
+        created_task_ids.push(task_id);
+    }
+
+    for event_name in &effects.emit_events {
+        process.pending_events.push(PendingEvent {
+            event: event_name.clone(),
+            actor_id: actor_id.map(str::to_string),
+            data: None,
+            timestamp: now_iso.to_string(),
+            idempotency_token: None,
+        });
+        emitted_events.push(event_name.clone());
+    }
+
+    (created_task_ids, emitted_events, provenance)
 }
 
 impl WosRuntime {
@@ -126,8 +210,23 @@ impl WosRuntime {
             let ev_name = event.event.clone();
             let ev_actor = event.actor_id.clone();
             let ev_data = event.data.clone();
+            let ev_token = event.idempotency_token.clone();
             let actor_roles: Vec<String> = ev_actor.iter().cloned().collect();
-            let gate = {
+            // Lazy deadline-expiry scan (WOS-OBL-TIME-1004) ahead of the gate so a
+            // newly-elapsed obligation's `block`/`escalate`/`fail`/`createTask`
+            // effect is composed with any `violateWhen` match this event triggers.
+            let mut gate = evaluate_deadline_expiries(
+                &obligation_policies,
+                &mut record.process,
+                now_ms,
+                &now_iso,
+            );
+            appended_provenance.extend(evaluate_deadline_warnings(
+                &obligation_policies,
+                &mut record.process,
+                now_ms,
+            ));
+            {
                 let obl_event = ObligationEvent {
                     event_name: &ev_name,
                     event_data: ev_data.as_ref(),
@@ -139,11 +238,45 @@ impl WosRuntime {
                     transition_tags: &[],
                     now_ms,
                     now_iso: &now_iso,
+                    idempotency_token: ev_token.as_deref(),
                 };
-                evaluate_pre_event_gate(&obligation_policies, &mut record.process, &obl_event)
-            };
-            appended_provenance.extend(gate.provenance);
-            if gate.block {
+                let pass =
+                    evaluate_pre_event_gate(&obligation_policies, &mut record.process, &obl_event);
+                gate.provenance.extend(pass.provenance);
+                gate.effects.merge(pass.effects);
+            }
+            appended_provenance.extend(std::mem::take(&mut gate.provenance));
+
+            // Realize the composing effects (createTask / emitEvent) regardless of
+            // whether a gating action also fired — they accumulate additively.
+            let (task_ids, emitted, effect_prov) = realize_obligation_effects(
+                &mut record.process,
+                &gate.effects,
+                ev_actor.as_deref(),
+                kernel.impact_level,
+                &now_iso,
+            );
+            appended_provenance.extend(effect_prov);
+            runtime_result.created_task_ids.extend(task_ids);
+            runtime_result.emitted_events.extend(emitted);
+
+            // Gating effects (strictest of block/fail/escalate; WOS-OBL-RUNTIME-0913):
+            // any of them prevents the kernel from applying the event. `escalate`
+            // additionally reroutes by enqueuing the escalation event for a later
+            // drain step (mirrors the companion-policy reroute target).
+            if gate.effects.gates() {
+                if !gate.effects.block && !gate.effects.failed {
+                    if let Some(reroute) = &gate.effects.reroute_to {
+                        record.process.pending_events.push(PendingEvent {
+                            event: reroute.clone(),
+                            actor_id: ev_actor.clone(),
+                            data: None,
+                            timestamp: now_iso.clone(),
+                            idempotency_token: None,
+                        });
+                        runtime_result.emitted_events.push(reroute.clone());
+                    }
+                }
                 populate_provenance_record_fields(
                     &mut appended_provenance,
                     &kernel,
@@ -237,6 +370,7 @@ impl WosRuntime {
             let ev_name = event.event.clone();
             let ev_actor = event.actor_id.clone();
             let ev_data = event.data.clone();
+            let ev_token = event.idempotency_token.clone();
             let actor_roles: Vec<String> = ev_actor.iter().cloned().collect();
             let obl_event = ObligationEvent {
                 event_name: &ev_name,
@@ -249,6 +383,7 @@ impl WosRuntime {
                 transition_tags: &[],
                 now_ms,
                 now_iso: &now_iso,
+                idempotency_token: ev_token.as_deref(),
             };
             appended_provenance.extend(evaluate_satisfactions(
                 &obligation_policies,
@@ -304,8 +439,10 @@ impl WosRuntime {
         self.deliver_pending_presentations(&pending_presentations)?;
 
         runtime_result.provenance = appended_provenance;
-        runtime_result.created_task_ids = created_task_ids;
-        runtime_result.emitted_events = emitted_events;
+        // Extend (not assign): the pre-event obligation gate may already have
+        // recorded obligation-driven `createTask` / `emitEvent` effects.
+        runtime_result.created_task_ids.extend(created_task_ids);
+        runtime_result.emitted_events.extend(emitted_events);
         Ok(runtime_result)
     }
 

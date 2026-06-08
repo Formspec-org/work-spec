@@ -21,6 +21,7 @@ use time::format_description::well_known::Rfc3339;
 
 use wos_core::activation::{ActivationContext, evaluate_activation_criteria};
 use wos_core::instance::WorkflowProcess;
+use wos_core::model::activation::ActivationCriteria;
 use wos_core::model::obligation::{
     DuplicatePolicy, ObligationPolicy, ObligationStatus, ObligationViolationAction,
     PendingObligation, ViolationActionKind,
@@ -51,6 +52,10 @@ pub struct ObligationEvent<'a> {
     pub now_ms: u64,
     /// Current ISO 8601 timestamp (activation stamp).
     pub now_iso: &'a str,
+    /// Idempotency token of the draining event, when one was supplied. Used to
+    /// dedupe activation on replay (WOS-OBL-RUNTIME-0916); `None` disables the
+    /// token-based guard (the per-policy `duplicatePolicy` still applies).
+    pub idempotency_token: Option<&'a str>,
 }
 
 impl<'a> ObligationEvent<'a> {
@@ -153,6 +158,21 @@ impl ViolationEffects {
     pub fn gates(&self) -> bool {
         self.block || self.failed || self.reroute_to.is_some()
     }
+
+    /// Fold another effects accumulation into this one, preserving the
+    /// strictness ladder for gating actions (`block`/`fail` win; the first
+    /// `escalate` target is kept) and concatenating the composing actions. Used
+    /// to combine a deadline-expiry pass with the event-driven gate pass within
+    /// one drain step (WOS-OBL-RUNTIME-0913).
+    pub fn merge(&mut self, other: ViolationEffects) {
+        self.block |= other.block;
+        self.failed |= other.failed;
+        if self.reroute_to.is_none() {
+            self.reroute_to = other.reroute_to;
+        }
+        self.create_tasks.extend(other.create_tasks);
+        self.emit_events.extend(other.emit_events);
+    }
 }
 
 /// Outcome of the pre-event obligation gate.
@@ -245,18 +265,161 @@ pub fn evaluate_pre_event_gate(
             continue;
         }
         let action = policy.on_violation.kind();
+        // Snapshot the obligation's deadline / responsible fields for the witness
+        // before re-borrowing `instance` mutably to flip the status.
+        let (deadline, responsible_actor, responsible_role) =
+            obligation_witness_fields(instance, i);
         set_status(instance, i, ObligationStatus::Violated);
+        // PII-minimized witness: only the JSON paths `violateWhen` references.
+        let event_witness = project_referenced_event(violate_when, ev.event_data);
+        let case_state_witness = project_referenced_case_state(violate_when, ev.case_state);
         outcome.provenance.push(ProvenanceRecord::obligation_violated(
             &policy_id,
             &obligation_id,
             "violateWhen matched while obligation pending",
             violation_action_str(action),
+            ObligationViolationWitness {
+                trigger_event: Some(ev.event_name),
+                deadline: deadline.as_deref(),
+                responsible_actor: responsible_actor.as_deref(),
+                responsible_role: responsible_role.as_deref(),
+                event_witness,
+                case_state_witness,
+            },
         ));
-        if action == ViolationActionKind::Block {
-            outcome.block = true;
+        outcome.effects.apply(
+            &policy.on_violation,
+            ObligationTaskRequest {
+                task_ref: policy.id.clone(),
+                obligation_id: obligation_id.clone(),
+                policy_id: policy.id.clone(),
+            },
+        );
+    }
+    outcome.block = outcome.effects.block;
+    outcome
+}
+
+/// The lazy deadline-expiry scan (WOS-OBL-TIME-1004). For each `Pending`
+/// obligation whose stored ISO-8601 `deadline` is at or before `now`, mark it
+/// `Expired`, emit `ObligationExpired`, and apply the policy's `onViolation`
+/// effect (composed by the strictness ladder, exactly as the pre-event gate).
+///
+/// Satisfied / cancelled / already-expired obligations are skipped because
+/// [`pending_snapshot`] only yields `Pending` rows — so an obligation that was
+/// discharged before its deadline never fires a late expiry
+/// (WOS-OBL-TIME-1005/1006).
+pub fn evaluate_deadline_expiries(
+    policies: &[ObligationPolicy],
+    instance: &mut WorkflowProcess,
+    now_ms: u64,
+    _now_iso: &str,
+) -> ObligationGateOutcome {
+    let mut outcome = ObligationGateOutcome::default();
+    let count = pending_len(instance);
+    for i in 0..count {
+        let Some((policy_id, obligation_id, _trigger)) = pending_snapshot(instance, i) else {
+            continue;
+        };
+        let (deadline, responsible_actor, responsible_role) =
+            obligation_witness_fields(instance, i);
+        let Some(deadline) = deadline else {
+            continue;
+        };
+        let Some(deadline_ms) = parse_iso_to_ms(&deadline) else {
+            continue;
+        };
+        if now_ms < deadline_ms {
+            continue;
+        }
+        let Some(policy) = find_policy(policies, &policy_id) else {
+            continue;
+        };
+        let action = policy.on_violation.kind();
+        set_status(instance, i, ObligationStatus::Expired);
+        outcome.provenance.push(ProvenanceRecord::obligation_expired(
+            &policy_id,
+            &obligation_id,
+            violation_action_str(action),
+        ));
+        // The deadline-elapsed violation carries no event witness (it is
+        // time-driven, not event-driven); only the deadline + responsible
+        // metadata accompany it (WOS-OBL-PROV-1103).
+        outcome.provenance.push(ProvenanceRecord::obligation_violated(
+            &policy_id,
+            &obligation_id,
+            "deadline elapsed while obligation pending",
+            violation_action_str(action),
+            ObligationViolationWitness {
+                trigger_event: None,
+                deadline: Some(&deadline),
+                responsible_actor: responsible_actor.as_deref(),
+                responsible_role: responsible_role.as_deref(),
+                event_witness: None,
+                case_state_witness: None,
+            },
+        ));
+        outcome.effects.apply(
+            &policy.on_violation,
+            ObligationTaskRequest {
+                task_ref: policy.id.clone(),
+                obligation_id: obligation_id.clone(),
+                policy_id: policy.id.clone(),
+            },
+        );
+    }
+    outcome.block = outcome.effects.block;
+    outcome
+}
+
+/// Lazy pre-breach warning scan (WOS-OBL-TIME-1007). For each `Pending`
+/// obligation with a deadline and one or more `warningThresholds`, emit
+/// `ObligationWarning` once per threshold whose `beforeBreach` window has been
+/// entered (i.e. `now >= deadline - beforeBreach`). Fired thresholds are
+/// recorded in the obligation's `extensions` under
+/// [`FIRED_WARNINGS_EXT_KEY`] so a replay or a later drain does not re-emit.
+pub fn evaluate_deadline_warnings(
+    policies: &[ObligationPolicy],
+    instance: &mut WorkflowProcess,
+    now_ms: u64,
+) -> Vec<ProvenanceRecord> {
+    let mut records = Vec::new();
+    let count = pending_len(instance);
+    for i in 0..count {
+        let Some((policy_id, obligation_id, _trigger)) = pending_snapshot(instance, i) else {
+            continue;
+        };
+        let (deadline, _actor, _role) = obligation_witness_fields(instance, i);
+        let Some(deadline) = deadline else { continue };
+        let Some(deadline_ms) = parse_iso_to_ms(&deadline) else {
+            continue;
+        };
+        let Some(policy) = find_policy(policies, &policy_id) else {
+            continue;
+        };
+        let Some(cfg) = &policy.deadline else { continue };
+        for threshold in &cfg.warning_thresholds {
+            let Ok(lead_ms) = wos_core::parse_iso_duration_to_ms(&threshold.before_breach) else {
+                continue;
+            };
+            let window_start = deadline_ms.saturating_sub(lead_ms);
+            // Within the window but not yet past the deadline (expiry, not
+            // warning, governs once the deadline elapses).
+            if now_ms < window_start || now_ms >= deadline_ms {
+                continue;
+            }
+            if warning_already_fired(instance, i, &threshold.before_breach) {
+                continue;
+            }
+            mark_warning_fired(instance, i, &threshold.before_breach);
+            records.push(ProvenanceRecord::obligation_warning(
+                &policy_id,
+                &obligation_id,
+                &threshold.before_breach,
+            ));
         }
     }
-    outcome
+    records
 }
 
 /// Post-event: for each policy whose `activateWhen` matches, create a pending
@@ -277,6 +440,19 @@ pub fn evaluate_activations(
         }
 
         let governance = instance.governance_state.get_or_insert_with(Default::default);
+
+        // Replay dedupe (WOS-OBL-RUNTIME-0916): a re-drained event carrying the
+        // same idempotency token MUST NOT activate the same policy twice. The
+        // key is deterministic in `(policy, token)`, so the second pass is a
+        // no-op and the provenance stream is identical to the first.
+        let dedupe_key = ev
+            .idempotency_token
+            .map(|token| format!("{}#{}", policy.id, token));
+        if let Some(key) = &dedupe_key {
+            if governance.seen_obligation_activation_keys.contains(key) {
+                continue;
+            }
+        }
 
         // Duplicate policy: inspect existing pending obligations for this policy.
         let pending_same = governance
@@ -338,6 +514,9 @@ pub fn evaluate_activations(
             correlation_key: None,
             extensions: Default::default(),
         });
+        if let Some(key) = dedupe_key {
+            governance.seen_obligation_activation_keys.push(key);
+        }
         records.push(ProvenanceRecord::obligation_activated(
             &policy.id,
             &obligation_id,
@@ -452,6 +631,120 @@ fn set_status(instance: &mut WorkflowProcess, i: usize, status: ObligationStatus
     }
 }
 
+/// Snapshot the `(deadline, responsible_actor, responsible_role)` of pending
+/// obligation `i` as owned values, for witness construction without holding a
+/// borrow across the subsequent `set_status` mutation.
+fn obligation_witness_fields(
+    instance: &WorkflowProcess,
+    i: usize,
+) -> (Option<String>, Option<String>, Option<String>) {
+    instance
+        .governance_state
+        .as_ref()
+        .and_then(|g| g.pending_obligations.get(i))
+        .map(|o| {
+            (
+                o.deadline.clone(),
+                o.responsible_actor.clone(),
+                o.responsible_role.clone(),
+            )
+        })
+        .unwrap_or((None, None, None))
+}
+
+/// Extension key under which fired warning thresholds are recorded on a
+/// [`PendingObligation`] (WOS-OBL-TIME-1007): a JSON array of `beforeBreach`
+/// strings. Stored in `extensions` so it round-trips through process JSON and
+/// survives replay without re-firing.
+const FIRED_WARNINGS_EXT_KEY: &str = "x-wos-obligation-fired-warnings";
+
+fn warning_already_fired(instance: &WorkflowProcess, i: usize, before_breach: &str) -> bool {
+    instance
+        .governance_state
+        .as_ref()
+        .and_then(|g| g.pending_obligations.get(i))
+        .and_then(|o| o.extensions.get(FIRED_WARNINGS_EXT_KEY))
+        .and_then(Value::as_array)
+        .is_some_and(|fired| fired.iter().any(|v| v.as_str() == Some(before_breach)))
+}
+
+fn mark_warning_fired(instance: &mut WorkflowProcess, i: usize, before_breach: &str) {
+    if let Some(g) = instance.governance_state.as_mut() {
+        if let Some(o) = g.pending_obligations.get_mut(i) {
+            let fired = o
+                .extensions
+                .entry(FIRED_WARNINGS_EXT_KEY.to_string())
+                .or_insert_with(|| Value::Array(Vec::new()));
+            if let Some(arr) = fired.as_array_mut() {
+                arr.push(Value::String(before_breach.to_string()));
+            }
+        }
+    }
+}
+
+/// Parse a stored RFC 3339 / ISO 8601 timestamp back to epoch milliseconds, for
+/// deadline comparison. Inverse of [`format_ms_to_iso`]; returns `None` for
+/// unparseable or pre-epoch / overflowing values.
+fn parse_iso_to_ms(iso: &str) -> Option<u64> {
+    let nanos = OffsetDateTime::parse(iso, &Rfc3339)
+        .ok()?
+        .unix_timestamp_nanos();
+    u64::try_from(nanos / 1_000_000).ok()
+}
+
+/// Project the PII-minimized event-witness subset for a violation record: only
+/// the `event.*` paths the criteria's `required_data` references (WOS-OBL-PROV-1103).
+/// Returns `None` when the criteria reference no event paths, so a violation
+/// over data the policy never named carries no witness subset at all.
+fn project_referenced_event(
+    criteria: &ActivationCriteria,
+    event_data: Option<&Value>,
+) -> Option<Value> {
+    project_namespace(criteria, "event", event_data?)
+}
+
+/// Project the PII-minimized case-state-witness subset: only the `caseFile.*`
+/// paths the criteria's `required_data` references.
+fn project_referenced_case_state(criteria: &ActivationCriteria, case_state: &Value) -> Option<Value> {
+    project_namespace(criteria, "caseFile", case_state)
+}
+
+/// Build a `{ path: value }` map of the dotted paths under `namespace` named in
+/// `criteria.required_data`, reading them out of `root`. Only present values are
+/// carried; the result is `None` when nothing was projected. The `where` FEL
+/// guard is intentionally NOT introspected — its inputs are not statically
+/// enumerated here, so the conservative choice is to omit rather than risk
+/// leaking an unreferenced field.
+fn project_namespace(criteria: &ActivationCriteria, namespace: &str, root: &Value) -> Option<Value> {
+    let mut map = serde_json::Map::new();
+    for path in &criteria.required_data {
+        let mut parts = path.split('.');
+        if parts.next() != Some(namespace) {
+            continue;
+        }
+        let rest: Vec<&str> = parts.collect();
+        let mut current = root;
+        let mut found = true;
+        for part in &rest {
+            match current.get(part) {
+                Some(next) => current = next,
+                None => {
+                    found = false;
+                    break;
+                }
+            }
+        }
+        if found {
+            map.insert(path.clone(), current.clone());
+        }
+    }
+    if map.is_empty() {
+        None
+    } else {
+        Some(Value::Object(map))
+    }
+}
+
 /// Compute an obligation deadline timestamp from the activation time and a
 /// `within` duration. Returns `None` for durations the wall-clock parser
 /// rejects (notably the business-day `P<N>BD` form, which requires a calendar).
@@ -561,6 +854,7 @@ mod tests {
             transition_tags: &[],
             now_ms: 0,
             now_iso: "2026-06-08T12:00:00Z",
+            idempotency_token: None,
         }
     }
 
@@ -734,5 +1028,261 @@ mod tests {
     #[test]
     fn format_ms_to_iso_epoch() {
         assert_eq!(format_ms_to_iso(0).as_deref(), Some("1970-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn parse_iso_round_trips_format() {
+        let iso = format_ms_to_iso(172_800_000).expect("iso"); // 2 days
+        assert_eq!(parse_iso_to_ms(&iso), Some(172_800_000));
+    }
+
+    // ── WOS-OBL-TIME-1004: lazy deadline expiry ─────────────────────────────
+
+    #[test]
+    fn deadline_expiry_marks_expired_and_blocks() {
+        let policies = policy_with_deadline("P2D"); // onViolation: block
+        let mut inst = bare_instance();
+        let cs = serde_json::json!({});
+        let ev = event("started", None, &cs, None, &[]); // now_ms = 0 → deadline 2 days
+        evaluate_activations(&policies, &mut inst, &ev);
+
+        // Before the deadline: no expiry.
+        let early = evaluate_deadline_expiries(&policies, &mut inst, 1, "1970-01-01T00:00:00.001Z");
+        assert!(early.provenance.is_empty());
+        assert!(!early.block);
+        assert_eq!(
+            inst.governance_state.as_ref().unwrap().pending_obligations[0].status,
+            ObligationStatus::Pending
+        );
+
+        // Past the deadline (2 days + 1ms): expiry fires + block effect.
+        let now = 2 * 24 * 60 * 60 * 1000 + 1;
+        let late = evaluate_deadline_expiries(&policies, &mut inst, now, "1970-01-03T00:00:00Z");
+        assert!(late.block, "block onViolation must gate on expiry");
+        // One ObligationExpired + one ObligationViolated record.
+        assert_eq!(late.provenance.len(), 2);
+        assert_eq!(
+            late.provenance[0].record_kind,
+            ProvenanceKind::ObligationExpired
+        );
+        assert_eq!(
+            late.provenance[1].record_kind,
+            ProvenanceKind::ObligationViolated
+        );
+        assert_eq!(
+            inst.governance_state.as_ref().unwrap().pending_obligations[0].status,
+            ObligationStatus::Expired
+        );
+    }
+
+    #[test]
+    fn satisfied_obligation_does_not_expire_later() {
+        let policies = policy_with_deadline("P2D");
+        let mut inst = bare_instance();
+        let cs = serde_json::json!({});
+        let ev = event("started", None, &cs, None, &[]);
+        evaluate_activations(&policies, &mut inst, &ev);
+        // Satisfy before deadline.
+        let done = event("done", None, &cs, Some("u-2"), &[]);
+        evaluate_satisfactions(&policies, &mut inst, &done);
+        assert_eq!(
+            inst.governance_state.as_ref().unwrap().pending_obligations[0].status,
+            ObligationStatus::Satisfied
+        );
+        // Advance well past the deadline → no late expiry (WOS-OBL-TIME-1005).
+        let now = 10 * 24 * 60 * 60 * 1000;
+        let out = evaluate_deadline_expiries(&policies, &mut inst, now, "1970-01-11T00:00:00Z");
+        assert!(out.provenance.is_empty());
+        assert!(!out.block);
+        assert_eq!(
+            inst.governance_state.as_ref().unwrap().pending_obligations[0].status,
+            ObligationStatus::Satisfied
+        );
+    }
+
+    // ── WOS-OBL-RUNTIME-0913: strictest gating action across violations ─────
+
+    fn two_policy_json(action_a: serde_json::Value, action_b: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "obligationPolicies": [
+                {
+                    "id": "policy-a",
+                    "activateWhen": { "on": { "event": "startA" } },
+                    "satisfyWhen": { "on": { "event": "doneA" } },
+                    "violateWhen": { "on": { "event": "trigger" } },
+                    "onViolation": action_a
+                },
+                {
+                    "id": "policy-b",
+                    "activateWhen": { "on": { "event": "startB" } },
+                    "satisfyWhen": { "on": { "event": "doneB" } },
+                    "violateWhen": { "on": { "event": "trigger" } },
+                    "onViolation": action_b
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn warn_plus_block_yields_block_with_two_records() {
+        let policies = load_obligation_policies(Some(&two_policy_json(
+            serde_json::json!("warn"),
+            serde_json::json!("block"),
+        )));
+        let mut inst = bare_instance();
+        let cs = serde_json::json!({});
+        evaluate_activations(&policies, &mut inst, &event("startA", None, &cs, None, &[]));
+        evaluate_activations(&policies, &mut inst, &event("startB", None, &cs, None, &[]));
+
+        let outcome =
+            evaluate_pre_event_gate(&policies, &mut inst, &event("trigger", None, &cs, None, &[]));
+        assert!(outcome.block, "block must win over warn");
+        assert!(outcome.effects.block);
+        // Both violations RECORDED.
+        assert_eq!(outcome.provenance.len(), 2);
+    }
+
+    #[test]
+    fn escalate_plus_block_yields_block() {
+        let policies = load_obligation_policies(Some(&two_policy_json(
+            serde_json::json!("escalate"),
+            serde_json::json!("block"),
+        )));
+        let mut inst = bare_instance();
+        let cs = serde_json::json!({});
+        evaluate_activations(&policies, &mut inst, &event("startA", None, &cs, None, &[]));
+        evaluate_activations(&policies, &mut inst, &event("startB", None, &cs, None, &[]));
+
+        let outcome =
+            evaluate_pre_event_gate(&policies, &mut inst, &event("trigger", None, &cs, None, &[]));
+        assert!(outcome.effects.block, "block supersedes escalate");
+        assert!(outcome.effects.gates());
+        assert_eq!(outcome.provenance.len(), 2);
+    }
+
+    #[test]
+    fn create_task_violation_composes_without_gating() {
+        let policies = load_obligation_policies(Some(&serde_json::json!({
+            "obligationPolicies": [{
+                "id": "notice-required",
+                "activateWhen": { "on": { "event": "started" } },
+                "satisfyWhen": { "on": { "event": "noticeSent" } },
+                "violateWhen": { "on": { "event": "trigger" } },
+                "onViolation": { "action": "createTask", "taskRef": "supervisorReview" }
+            }]
+        })));
+        let mut inst = bare_instance();
+        let cs = serde_json::json!({});
+        evaluate_activations(&policies, &mut inst, &event("started", None, &cs, None, &[]));
+        let outcome =
+            evaluate_pre_event_gate(&policies, &mut inst, &event("trigger", None, &cs, None, &[]));
+        assert!(!outcome.block);
+        assert!(!outcome.effects.gates(), "createTask does not gate");
+        assert_eq!(outcome.effects.create_tasks.len(), 1);
+        assert_eq!(outcome.effects.create_tasks[0].task_ref, "supervisorReview");
+        assert_eq!(
+            outcome.effects.create_tasks[0].obligation_id,
+            "notice-required#0"
+        );
+    }
+
+    // ── WOS-OBL-RUNTIME-0916: replay does not duplicate activations ─────────
+
+    #[test]
+    fn replay_with_same_token_does_not_duplicate() {
+        let policies = load_obligation_policies(Some(&serde_json::json!({
+            "obligationPolicies": [{
+                "id": "p-each",
+                "activateWhen": { "on": { "event": "started" } },
+                "satisfyWhen": { "on": { "event": "done" } },
+                "duplicatePolicy": "createEachTime",
+                "onViolation": "block"
+            }]
+        })));
+        let mut inst = bare_instance();
+        let cs = serde_json::json!({});
+        let mut ev = event("started", None, &cs, None, &[]);
+        ev.idempotency_token = Some("tok-1");
+
+        let first = evaluate_activations(&policies, &mut inst, &ev);
+        let second = evaluate_activations(&policies, &mut inst, &ev);
+
+        assert_eq!(first.len(), 1, "first drain activates once");
+        assert!(second.is_empty(), "replay must not re-activate");
+        assert_eq!(
+            inst.governance_state.as_ref().unwrap().pending_obligations.len(),
+            1
+        );
+    }
+
+    // ── WOS-OBL-TIME-1007: warning thresholds fire once per threshold ───────
+
+    #[test]
+    fn warning_threshold_fires_once_within_window() {
+        let policies = load_obligation_policies(Some(&serde_json::json!({
+            "obligationPolicies": [{
+                "id": "p-warn",
+                "activateWhen": { "on": { "event": "started" } },
+                "satisfyWhen": { "on": { "event": "done" } },
+                "deadline": { "within": "P2D", "warningThresholds": [
+                    { "beforeBreach": "P1D", "notify": ["underwriter"] }
+                ] },
+                "onViolation": "block"
+            }]
+        })));
+        let mut inst = bare_instance();
+        let cs = serde_json::json!({});
+        evaluate_activations(&policies, &mut inst, &event("started", None, &cs, None, &[]));
+
+        // Before the 1-day-before window: no warning.
+        let day = 24 * 60 * 60 * 1000;
+        let none = evaluate_deadline_warnings(&policies, &mut inst, day / 2);
+        assert!(none.is_empty());
+
+        // Inside the window (1.5 days in, deadline at 2 days): one warning.
+        let first = evaluate_deadline_warnings(&policies, &mut inst, day + day / 2);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].record_kind, ProvenanceKind::ObligationWarning);
+
+        // Re-scan in the same window: deduped, no re-fire.
+        let again = evaluate_deadline_warnings(&policies, &mut inst, day + day / 2 + 1);
+        assert!(again.is_empty(), "threshold fires once");
+    }
+
+    #[test]
+    fn violation_witness_carries_only_referenced_paths() {
+        let policies = load_obligation_policies(Some(&serde_json::json!({
+            "obligationPolicies": [{
+                "id": "p-witness",
+                "activateWhen": { "on": { "event": "started" } },
+                "satisfyWhen": { "on": { "event": "done" } },
+                "violateWhen": {
+                    "on": { "event": "trigger" },
+                    "requiredData": ["event.field", "caseFile.income"]
+                },
+                "responsibleRole": "underwriter",
+                "onViolation": "block"
+            }]
+        })));
+        let mut inst = bare_instance();
+        let cs = serde_json::json!({ "income": 60000, "ssn": "secret" });
+        evaluate_activations(&policies, &mut inst, &event("started", None, &cs, None, &[]));
+
+        let ed = serde_json::json!({ "field": "income", "note": "do-not-leak" });
+        let outcome = evaluate_pre_event_gate(
+            &policies,
+            &mut inst,
+            &event("trigger", Some(&ed), &cs, None, &[]),
+        );
+        let data = outcome.provenance[0].data.as_ref().unwrap();
+        // Referenced paths present; unreferenced fields ("note", "ssn") absent.
+        assert_eq!(data["eventWitness"]["event.field"], serde_json::json!("income"));
+        assert!(data["eventWitness"].get("event.note").is_none());
+        assert_eq!(
+            data["caseStateWitness"]["caseFile.income"],
+            serde_json::json!(60000)
+        );
+        assert!(data["caseStateWitness"].get("caseFile.ssn").is_none());
+        assert_eq!(data["responsibleRole"], serde_json::json!("underwriter"));
     }
 }
