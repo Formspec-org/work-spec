@@ -14,6 +14,7 @@ pub mod intake;
 pub mod integration;
 pub mod integration_handlers;
 pub mod milestones;
+pub mod obligations;
 pub mod policy_decision;
 pub mod restate_fixture_support;
 pub mod runtime;
