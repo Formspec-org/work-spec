@@ -9,9 +9,14 @@
 //! Temporal/Restate adapter spikes are introduced.
 
 use wos_core::eval::Evaluator;
-use wos_core::{ProvenanceKind, ProvenanceRecord};
+use wos_core::model::kernel::KernelDocument;
+use wos_core::{ActorKind, ProvenanceKind, ProvenanceRecord};
 
 use crate::milestones::evaluate_milestones;
+use crate::obligations::{
+    ObligationEvent, evaluate_activations, evaluate_cancellations, evaluate_pre_event_gate,
+    evaluate_satisfactions, load_obligation_policies,
+};
 
 use super::timers::{
     annotate_timer_created_with_calendar_version, annotate_timer_created_with_convergence_error,
@@ -21,6 +26,15 @@ use super::{
     DrainOnceResult, RuntimeError, RuntimeEventContext, WosRuntime, compensation_provenance,
     format_timestamp, populate_provenance_record_fields, stamp_provenance,
 };
+
+/// Resolve an event actor's kind from the kernel actor registry, for
+/// obligation actor-constraint evaluation. WOS actors carry an `id` and a
+/// `kind`; an actor's `id` doubles as its role (the id-as-role convention used
+/// by transition `actor` matching), so callers pass `[actor_id]` as the role set.
+fn resolve_actor_kind(kernel: &KernelDocument, actor_id: Option<&str>) -> Option<ActorKind> {
+    let id = actor_id?;
+    kernel.actors.iter().find(|a| a.id == id).map(|a| a.kind)
+}
 
 impl WosRuntime {
     /// Drain a single event from the instance queue.
@@ -59,6 +73,8 @@ impl WosRuntime {
             &record.process.definition_url,
             &record.process.definition_version,
         )?;
+        // Durable obligation policies (ADR 0096) live in the governance block.
+        let obligation_policies = load_obligation_policies(kernel.governance.as_ref());
         let mut runtime_result = DrainOnceResult {
             processed_event: Some(event.event.clone()),
             processed_event_token: event.idempotency_token.clone(),
@@ -100,6 +116,48 @@ impl WosRuntime {
             event.actor_id.as_deref(),
             &now_iso,
         )?);
+
+        // Pre-event obligation gate (ADR 0096 §16.2.3 step 4): a pending
+        // obligation's `violateWhen` may block this event before the kernel
+        // applies it. Runs against the pre-event case state; mirrors the
+        // companion-policy block path on a `block` outcome.
+        if !obligation_policies.is_empty() {
+            let pre_case_state = record.process.case_state.clone();
+            let ev_name = event.event.clone();
+            let ev_actor = event.actor_id.clone();
+            let ev_data = event.data.clone();
+            let actor_roles: Vec<String> = ev_actor.iter().cloned().collect();
+            let gate = {
+                let obl_event = ObligationEvent {
+                    event_name: &ev_name,
+                    event_data: ev_data.as_ref(),
+                    event_tags: &[],
+                    actor_id: ev_actor.as_deref(),
+                    actor_roles: &actor_roles,
+                    actor_type: resolve_actor_kind(&kernel, ev_actor.as_deref()),
+                    case_state: &pre_case_state,
+                    transition_tags: &[],
+                    now_ms,
+                    now_iso: &now_iso,
+                };
+                evaluate_pre_event_gate(&obligation_policies, &mut record.process, &obl_event)
+            };
+            appended_provenance.extend(gate.provenance);
+            if gate.block {
+                populate_provenance_record_fields(
+                    &mut appended_provenance,
+                    &kernel,
+                    &record.process.definition_version,
+                );
+                stamp_provenance(&mut appended_provenance, &now_iso);
+                record.process.updated_at = now_iso;
+                record.process.provenance_position += appended_provenance.len() as u64;
+                record.provenance_log.extend(appended_provenance.clone());
+                self.store.save_record(record)?;
+                runtime_result.provenance = appended_provenance;
+                return Ok(runtime_result);
+            }
+        }
 
         let mut evaluator = Evaluator::from_instance(kernel.clone(), &record.process, now_ms)
             .map_err(|error| RuntimeError::Evaluator(error.to_string()))?;
@@ -171,6 +229,43 @@ impl WosRuntime {
         let post_state = record.process.case_state.clone();
         let milestone_records = evaluate_milestones(&kernel, &mut record.process, &post_state);
         appended_provenance.extend(milestone_records);
+
+        // Post-event obligation lifecycle (ADR 0096 §16.2.3 step 6): evaluate
+        // satisfactions/cancellations of existing obligations, then activations
+        // of new ones, against the post-event case state.
+        if !obligation_policies.is_empty() {
+            let ev_name = event.event.clone();
+            let ev_actor = event.actor_id.clone();
+            let ev_data = event.data.clone();
+            let actor_roles: Vec<String> = ev_actor.iter().cloned().collect();
+            let obl_event = ObligationEvent {
+                event_name: &ev_name,
+                event_data: ev_data.as_ref(),
+                event_tags: &[],
+                actor_id: ev_actor.as_deref(),
+                actor_roles: &actor_roles,
+                actor_type: resolve_actor_kind(&kernel, ev_actor.as_deref()),
+                case_state: &post_state,
+                transition_tags: &[],
+                now_ms,
+                now_iso: &now_iso,
+            };
+            appended_provenance.extend(evaluate_satisfactions(
+                &obligation_policies,
+                &mut record.process,
+                &obl_event,
+            ));
+            appended_provenance.extend(evaluate_cancellations(
+                &obligation_policies,
+                &mut record.process,
+                &obl_event,
+            ));
+            appended_provenance.extend(evaluate_activations(
+                &obligation_policies,
+                &mut record.process,
+                &obl_event,
+            ));
+        }
 
         let actions = evaluator.take_executed_actions();
         let (created_task_ids, emitted_events, runtime_provenance) =
