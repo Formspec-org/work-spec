@@ -1,6 +1,6 @@
 # WOS Implementation Status & Roadmap
 
-**Last updated:** 2026-04-22
+**Last updated:** 2026-06-08
 **Status:** Certified Reference Implementation (Draft 1)
 
 This document tracks crate maturity, test coverage, and the technical roadmap. For a high-level feature comparison, see `WOS-FEATURE-MATRIX.md`.
@@ -93,6 +93,7 @@ WOS employs a linked-data architecture to ensure interoperability and AI-safety.
 *   [x] **Provenance Export Formats:** `wos-export` crate serializes internal provenance to W3C PROV-O (JSON-LD), IEEE 1849 XES (XML), and OCEL 2.0 (JSON) per Semantic Profile §§5.3–5.6 and §§6.3–6.4; `timestamp` added to `ProvenanceRecord` as export prerequisite; 3 SP-EXPORT-* conformance fixtures green (`sp-export-prov-o`, `sp-export-xes`, `sp-export-ocel`). Known limitations: higher-tier PROV-O bundles (§5.4 Reasoning/Counterfactual/Narrative) not emitted; OCEL case-file-item object tracking linked to instance object only (per-item E2O links future); SHACL validation of PROV-O output out of scope; agent actor-type currently falls back to plain `prov:Agent` pending `ProvenanceRecord` actor-type extension.
 *   [ ] **Simulation Trace Format:** Standardizes formats for replaying simulation runs.
 *   [ ] **Federation Profile:** Enables cross-processor migration and signal routing.
+*   [ ] **Shared Activation Criteria + Durable Obligations** (ADR 0096; planned): a reusable `ActivationCriteria` shape ("when does this become active?") and durable pending obligations (`ObligationPolicy` → `PendingObligation`, lifecycle `pending → satisfied/violated/cancelled/expired/bypassed`) with deadline timers, violation actions, and provenance. Distinct from DCR constraint zones (zone-local flexible-activity sequencing), task SLAs (`SlaDefinition`), milestones (data-driven checkpoints), the deontic `Obligation` (immediate pre-commit agent-output check), and the policy-engine `Obligation` (per-decision directive). Planned surfaces: `governance.obligationPolicies[]` + `$defs/ActivationCriteria` / `$defs/ObligationPolicy` (`wos-workflow.schema.json`); `wos-core` model `activation.rs` / `obligation.rs` + activation evaluator; `wos-runtime` `obligations.rs` monitor in the drain loop reusing the companion-policy + milestone + timer machinery; `ObligationActivated/Satisfied/Violated/Cancelled/Expired/Bypassed/Warning` provenance kinds in `wos-events`; PROV-O/XES/OCEL export; `ACT-*`/`OBL-*` lint + conformance families. No FEL grammar change (FEL stays the local boolean predicate inside `where`).
 
 ### Phase 3: Adoption Artifacts
 *   [ ] Kubernetes and Serverless reference deployment patterns.
