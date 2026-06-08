@@ -566,6 +566,42 @@ mod tests {
     }
 
     #[test]
+    fn exports_obligation_violated_as_prov_activity_without_panic() {
+        // WOS-OBL-EXPORT-1201: obligation records flow through the generic
+        // §5.3 mapping. PROV-O does not project `data` (policyId/obligationId
+        // live there), so the assertion is on the Activity envelope: a stable
+        // `wos:actionType` and the actor association. The witness payload
+        // round-trips inside the record's `data` for OCEL; here we only prove
+        // the Facts-tier obligation record produces a valid Activity node.
+        let mut log = ProvenanceLog::default();
+        // Build the obligation record via the generic seam (record_kind + data)
+        // rather than the typed constructor: `ObligationViolationWitness` lives
+        // in wos-events and is not re-exported through wos-core, and this
+        // exporter only needs the record_kind + envelope to exercise §5.3.
+        let mut record = ProvenanceRecord::state_transition("a", "b", "ev", Some("caseworker-7"));
+        record.record_kind = ProvenanceKind::ObligationViolated;
+        record.data = Some(json!({
+            "policyId": "policy-1",
+            "obligationId": "obl-1",
+            "reason": "deadline elapsed",
+            "effectiveAction": "suspend",
+            "responsibleActor": "caseworker-7",
+        }));
+        record.timestamp = "2026-01-01T00:00:00Z".into();
+        log.push(record);
+
+        let document = export(&log, &config());
+
+        let activity = &document.graph[0];
+        assert_eq!(activity["@type"], "prov:Activity");
+        assert_eq!(activity["wos:actionType"], "obligationViolated");
+        assert_eq!(
+            activity["prov:wasAssociatedWith"],
+            "urn:wos:prov:test:agent/caseworker-7"
+        );
+    }
+
+    #[test]
     fn camel_cases_all_record_kinds() {
         // Exhaustive parity check: every `ProvenanceKind` variant exports as
         // its serde-camelCase string verbatim. Mirrors the
@@ -696,11 +732,18 @@ mod tests {
             ProvenanceKind::CommitAttemptFailure,
             ProvenanceKind::AuthorizationRejected,
             ProvenanceKind::MigrationPinChanged,
+            ProvenanceKind::ObligationActivated,
+            ProvenanceKind::ObligationSatisfied,
+            ProvenanceKind::ObligationViolated,
+            ProvenanceKind::ObligationCancelled,
+            ProvenanceKind::ObligationExpired,
+            ProvenanceKind::ObligationBypassed,
+            ProvenanceKind::ObligationWarning,
         ];
         assert_eq!(
             all.len(),
-            115,
-            "ProvenanceKind has 115 variants at HEAD (101 prior + 14 from ADRs 0066-0071); this test must enumerate all of them so a new variant forces a conscious entry"
+            122,
+            "ProvenanceKind has 122 variants at HEAD (115 prior + 7 durable-obligation kinds from ADR 0096); this test must enumerate all of them so a new variant forces a conscious entry"
         );
 
         let mut log = ProvenanceLog::default();

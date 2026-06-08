@@ -521,6 +521,48 @@ pub struct SignatureAdmissionFailedInput<'a> {
     pub emitted_at: &'a str,
 }
 
+/// Witness payload for [`ProvenanceRecord::obligation_violated`]
+/// (ADR 0096; WOS-OBL-PROV-1103).
+///
+/// A violation record is a Facts-tier audit artifact that a regulator or
+/// downstream verifier may read in isolation, so it carries enough context to
+/// reconstruct *why* the obligation was deemed violated without re-running the
+/// engine. The witness is the **minimized** evidence set, NOT a full snapshot.
+///
+/// # PII minimization (load-bearing)
+///
+/// `event_witness` and `case_state_witness` MUST carry only the JSON paths the
+/// obligation's `ActivationCriteria` actually referenced (its `where` FEL
+/// inputs, `requiredData` presence paths, and the trigger event's matched
+/// fields) — never the full triggering event payload or the full case-file
+/// snapshot. The caller (runtime obligation monitor) is responsible for
+/// projecting those referenced paths before constructing the witness; this
+/// constructor stores whatever subset it is handed verbatim. Keeping the
+/// projection at the caller keeps WOS from leaking benefit amounts, SSNs, or
+/// other sensitive fields into an audit record that may be exported more
+/// widely than the case file itself. Both witness subsets are `Option` so a
+/// violation with no referenced data (e.g. a pure deadline-elapsed violation)
+/// emits no witness subset at all.
+#[derive(Debug, Clone, Default)]
+pub struct ObligationViolationWitness<'a> {
+    /// Hash or URI of the event that triggered violation evaluation, when a
+    /// concrete event drove the decision. Omit for time-driven violations.
+    pub trigger_event: Option<&'a str>,
+    /// The obligation's deadline (RFC 3339), when one applies.
+    pub deadline: Option<&'a str>,
+    /// Identifier of the actor responsible for discharging the obligation,
+    /// when the obligation is actor-scoped.
+    pub responsible_actor: Option<&'a str>,
+    /// Role responsible for discharging the obligation, when role-scoped.
+    pub responsible_role: Option<&'a str>,
+    /// PII-minimized subset of the triggering event payload: ONLY the paths
+    /// the obligation criteria referenced. MUST NOT be the full event.
+    pub event_witness: Option<serde_json::Value>,
+    /// PII-minimized subset of case-file state: ONLY the paths the obligation
+    /// criteria referenced. MUST NOT be the full case-file snapshot.
+    pub case_state_witness: Option<serde_json::Value>,
+}
+
 /// A single provenance record.
 ///
 /// Records carry an RFC 3339 / ISO 8601 `timestamp` populated by the runtime
@@ -939,19 +981,71 @@ impl ProvenanceRecord {
 
     /// A pending obligation was violated. `effective_action` is the strictest
     /// applied action (Governance §16.2.4).
+    ///
+    /// The `witness` carries the PII-minimized evidence subset
+    /// (WOS-OBL-PROV-1103): the trigger event, deadline, responsible
+    /// actor/role, and the *referenced-paths-only* event and case-state
+    /// witnesses. See [`ObligationViolationWitness`] for the minimization
+    /// contract. Optional witness fields that are `None` are omitted from
+    /// `data` entirely, so a bare violation (no witness populated) serializes
+    /// to the same four required keys as before this enrichment.
     pub fn obligation_violated(
         policy_id: &str,
         obligation_id: &str,
         reason: &str,
         effective_action: &str,
+        witness: ObligationViolationWitness<'_>,
     ) -> Self {
         let mut record = Self::blank(ProvenanceKind::ObligationViolated);
-        record.data = Some(serde_json::json!({
-            "policyId": policy_id,
-            "obligationId": obligation_id,
-            "reason": reason,
-            "effectiveAction": effective_action,
-        }));
+        let mut data = serde_json::Map::from_iter([
+            (
+                "policyId".to_string(),
+                serde_json::Value::String(policy_id.to_string()),
+            ),
+            (
+                "obligationId".to_string(),
+                serde_json::Value::String(obligation_id.to_string()),
+            ),
+            (
+                "reason".to_string(),
+                serde_json::Value::String(reason.to_string()),
+            ),
+            (
+                "effectiveAction".to_string(),
+                serde_json::Value::String(effective_action.to_string()),
+            ),
+        ]);
+        if let Some(trigger_event) = witness.trigger_event {
+            data.insert(
+                "triggerEvent".to_string(),
+                serde_json::Value::String(trigger_event.to_string()),
+            );
+        }
+        if let Some(deadline) = witness.deadline {
+            data.insert(
+                "deadline".to_string(),
+                serde_json::Value::String(deadline.to_string()),
+            );
+        }
+        if let Some(responsible_actor) = witness.responsible_actor {
+            data.insert(
+                "responsibleActor".to_string(),
+                serde_json::Value::String(responsible_actor.to_string()),
+            );
+        }
+        if let Some(responsible_role) = witness.responsible_role {
+            data.insert(
+                "responsibleRole".to_string(),
+                serde_json::Value::String(responsible_role.to_string()),
+            );
+        }
+        if let Some(event_witness) = witness.event_witness {
+            data.insert("eventWitness".to_string(), event_witness);
+        }
+        if let Some(case_state_witness) = witness.case_state_witness {
+            data.insert("caseStateWitness".to_string(), case_state_witness);
+        }
+        record.data = Some(serde_json::Value::Object(data));
         record
     }
 
@@ -2290,5 +2384,112 @@ mod constructor_literal_drift_tests {
             })
             .expect("valid key-rebind fixture"),
         );
+    }
+
+    // ── Durable obligations (ADR 0096) ───────────────────────────
+
+    #[test]
+    fn given_obligation_constructors_when_built_then_record_kind_and_required_data_present() {
+        let activated = ProvenanceRecord::obligation_activated(
+            "policy-1",
+            "obl-1",
+            Some("event:submitted"),
+            Some("2026-06-10T00:00:00Z"),
+        );
+        assert_eq!(activated.record_kind, ProvenanceKind::ObligationActivated);
+        let data = activated.data.as_ref().expect("activated carries data");
+        assert_eq!(data["policyId"], "policy-1");
+        assert_eq!(data["obligationId"], "obl-1");
+        assert_eq!(data["triggerEvent"], "event:submitted");
+        assert_eq!(data["deadline"], "2026-06-10T00:00:00Z");
+
+        let satisfied = ProvenanceRecord::obligation_satisfied("policy-1", "obl-1", Some("worker"));
+        assert_eq!(satisfied.record_kind, ProvenanceKind::ObligationSatisfied);
+        assert_eq!(
+            satisfied.data.as_ref().expect("data")["satisfyingActor"],
+            "worker"
+        );
+
+        let cancelled = ProvenanceRecord::obligation_cancelled("policy-1", "obl-1");
+        assert_eq!(cancelled.record_kind, ProvenanceKind::ObligationCancelled);
+
+        let expired = ProvenanceRecord::obligation_expired("policy-1", "obl-1", "suspend");
+        assert_eq!(expired.record_kind, ProvenanceKind::ObligationExpired);
+        assert_eq!(
+            expired.data.as_ref().expect("data")["effectiveAction"],
+            "suspend"
+        );
+
+        let bypassed =
+            ProvenanceRecord::obligation_bypassed("policy-1", "obl-1", "supervisor", "override");
+        assert_eq!(bypassed.record_kind, ProvenanceKind::ObligationBypassed);
+        assert_eq!(
+            bypassed.data.as_ref().expect("data")["bypassActor"],
+            "supervisor"
+        );
+
+        let warning = ProvenanceRecord::obligation_warning("policy-1", "obl-1", "P1D");
+        assert_eq!(warning.record_kind, ProvenanceKind::ObligationWarning);
+        assert_eq!(warning.data.as_ref().expect("data")["beforeBreach"], "P1D");
+    }
+
+    /// A bare violation (default/empty witness) serializes to exactly the four
+    /// required keys — proving the witness enrichment is additive and does not
+    /// regress the pre-enrichment payload shape (WOS-OBL-PROV-1103).
+    #[test]
+    fn given_obligation_violated_with_empty_witness_then_only_required_keys_present() {
+        let record = ProvenanceRecord::obligation_violated(
+            "policy-1",
+            "obl-1",
+            "deadline elapsed",
+            "suspend",
+            ObligationViolationWitness::default(),
+        );
+        assert_eq!(record.record_kind, ProvenanceKind::ObligationViolated);
+        let data = record
+            .data
+            .as_ref()
+            .and_then(|value| value.as_object())
+            .expect("violation carries an object payload");
+        let mut keys: Vec<&str> = data.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["effectiveAction", "obligationId", "policyId", "reason"],
+            "empty witness must add no optional keys: {keys:?}"
+        );
+    }
+
+    /// A fully-populated witness carries the trigger event, deadline,
+    /// responsible actor/role, and the PII-minimized event / case-state witness
+    /// subsets verbatim (WOS-OBL-PROV-1103).
+    #[test]
+    fn given_obligation_violated_with_full_witness_then_minimized_subsets_carried() {
+        let record = ProvenanceRecord::obligation_violated(
+            "policy-1",
+            "obl-1",
+            "required submission missing",
+            "block",
+            ObligationViolationWitness {
+                trigger_event: Some("sha256:deadbeef"),
+                deadline: Some("2026-06-10T00:00:00Z"),
+                responsible_actor: Some("caseworker-7"),
+                responsible_role: Some("adjudicator"),
+                // Minimized subset: ONLY the referenced path, not the full event.
+                event_witness: Some(json!({ "form.section": "B" })),
+                case_state_witness: Some(json!({ "status": "pending" })),
+            },
+        );
+        let data = record
+            .data
+            .as_ref()
+            .and_then(|value| value.as_object())
+            .expect("violation carries an object payload");
+        assert_eq!(data["triggerEvent"], "sha256:deadbeef");
+        assert_eq!(data["deadline"], "2026-06-10T00:00:00Z");
+        assert_eq!(data["responsibleActor"], "caseworker-7");
+        assert_eq!(data["responsibleRole"], "adjudicator");
+        assert_eq!(data["eventWitness"], json!({ "form.section": "B" }));
+        assert_eq!(data["caseStateWitness"], json!({ "status": "pending" }));
     }
 }
