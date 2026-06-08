@@ -16,7 +16,7 @@
 >
 > **Updated 2026-04-28** for ADR 0076 step 12 — three new rules registered (`WOS-AGENT-XREF-001`, `WOS-SIG-COVER-001`, `WOS-VER-LEVEL-001`); I-001 reanchored to kernel/spec.md §9.2 (was Integration Profile §3.3.1, absorbed per ADR 0076 D-8).
 >
-> **Aggregate (post-rebase 2026-05-03):** **122** rules across **39** T1 / 74 T2 / 9 T3 (1 LoadBearing, 0 Stable, ≥4 Tested, balance Draft). Per-rule counts derive from the table below.
+> **Aggregate (updated 2026-06-08, ADR 0096):** **128** rules across **39** T1 / 80 T2 / 9 T3 (1 LoadBearing, 0 Stable, ≥15 Tested, balance Draft). The T2 figure includes the ten `ACT-001..010` activation/obligation rules (all `draft`). Per-rule counts derive from the table below.
 
 ```text
 ┌─────────────────────────────────────────────────────────────────┐
@@ -24,7 +24,7 @@
 │  Single-document structural checks. Pattern matching and graph  │
 │  walks over the JSON document tree. No parsing, no cross-doc.   │
 ├─────────────────────────────────────────────────────────────────┤
-│  Tier 2: wos-lint --project (cross)   75 rules                  │
+│  Tier 2: wos-lint --project (cross)   80 rules                  │
 │  Multi-document resolution + FEL AST analysis. Loads a project  │
 │  directory, resolves cross-references, parses FEL expressions.  │
 ├─────────────────────────────────────────────────────────────────┤
@@ -211,6 +211,6 @@
 | Tier | Total | LoadBearing | Stable | Tested | Draft |
 |------|-------|-------------|--------|--------|-------|
 | T1 | 39 | 0 | 0 | 4 | 35 |
-| T2 | 74 | 1 | 0 | 4 | 69 |
+| T2 | 80 | 1 | 0 | 4 | 75 |
 | T3 | 9 | 0 | 0 | 7 | 2 |
-| **Total** | **122** | **1** | **0** | **15** | **106** |
+| **Total** | **128** | **1** | **0** | **15** | **112** |
