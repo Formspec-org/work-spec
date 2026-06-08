@@ -895,6 +895,123 @@ impl ProvenanceRecord {
         record
     }
 
+    // ── Durable obligation builders (ADR 0096; WOS-OBL-PROV-1102) ───────────
+
+    /// A durable obligation was activated (a `PendingObligation` created).
+    pub fn obligation_activated(
+        policy_id: &str,
+        obligation_id: &str,
+        trigger_event: Option<&str>,
+        deadline: Option<&str>,
+    ) -> Self {
+        let mut record = Self::blank(ProvenanceKind::ObligationActivated);
+        let mut data = serde_json::json!({
+            "policyId": policy_id,
+            "obligationId": obligation_id,
+        });
+        if let Some(event) = trigger_event {
+            data["triggerEvent"] = serde_json::Value::String(event.to_string());
+        }
+        if let Some(deadline) = deadline {
+            data["deadline"] = serde_json::Value::String(deadline.to_string());
+        }
+        record.data = Some(data);
+        record
+    }
+
+    /// A pending obligation was satisfied (discharged).
+    pub fn obligation_satisfied(
+        policy_id: &str,
+        obligation_id: &str,
+        satisfying_actor: Option<&str>,
+    ) -> Self {
+        let mut record = Self::blank(ProvenanceKind::ObligationSatisfied);
+        let mut data = serde_json::json!({
+            "policyId": policy_id,
+            "obligationId": obligation_id,
+        });
+        if let Some(actor) = satisfying_actor {
+            data["satisfyingActor"] = serde_json::Value::String(actor.to_string());
+        }
+        record.data = Some(data);
+        record
+    }
+
+    /// A pending obligation was violated. `effective_action` is the strictest
+    /// applied action (Governance §16.2.4).
+    pub fn obligation_violated(
+        policy_id: &str,
+        obligation_id: &str,
+        reason: &str,
+        effective_action: &str,
+    ) -> Self {
+        let mut record = Self::blank(ProvenanceKind::ObligationViolated);
+        record.data = Some(serde_json::json!({
+            "policyId": policy_id,
+            "obligationId": obligation_id,
+            "reason": reason,
+            "effectiveAction": effective_action,
+        }));
+        record
+    }
+
+    /// A pending obligation was cancelled (a `cancelWhen` match).
+    pub fn obligation_cancelled(policy_id: &str, obligation_id: &str) -> Self {
+        let mut record = Self::blank(ProvenanceKind::ObligationCancelled);
+        record.data = Some(serde_json::json!({
+            "policyId": policy_id,
+            "obligationId": obligation_id,
+        }));
+        record
+    }
+
+    /// A pending obligation expired at its deadline.
+    pub fn obligation_expired(
+        policy_id: &str,
+        obligation_id: &str,
+        effective_action: &str,
+    ) -> Self {
+        let mut record = Self::blank(ProvenanceKind::ObligationExpired);
+        record.data = Some(serde_json::json!({
+            "policyId": policy_id,
+            "obligationId": obligation_id,
+            "effectiveAction": effective_action,
+        }));
+        record
+    }
+
+    /// A pending obligation was bypassed by an authorized actor.
+    pub fn obligation_bypassed(
+        policy_id: &str,
+        obligation_id: &str,
+        bypass_actor: &str,
+        rationale: &str,
+    ) -> Self {
+        let mut record = Self::blank(ProvenanceKind::ObligationBypassed);
+        record.data = Some(serde_json::json!({
+            "policyId": policy_id,
+            "obligationId": obligation_id,
+            "bypassActor": bypass_actor,
+            "rationale": rationale,
+        }));
+        record
+    }
+
+    /// A pre-breach warning fired for an obligation deadline.
+    pub fn obligation_warning(
+        policy_id: &str,
+        obligation_id: &str,
+        before_breach: &str,
+    ) -> Self {
+        let mut record = Self::blank(ProvenanceKind::ObligationWarning);
+        record.data = Some(serde_json::json!({
+            "policyId": policy_id,
+            "obligationId": obligation_id,
+            "beforeBreach": before_breach,
+        }));
+        record
+    }
+
     // ── ForEach iteration builders (Kernel §4.3.1; Sub-PR D-2) ──────────────
 
     /// One iteration of a `ForEach` state is starting.

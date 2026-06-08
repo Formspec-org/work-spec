@@ -444,6 +444,42 @@ pub enum ProvenanceKind {
     /// `trellis.conformanceClass`), `authorizingActorId`,
     /// `authorityBasis`, and `migrationRationale`.
     MigrationPinChanged,
+
+    // ── Durable obligations (ADR 0096) ───────────────────────────
+    /// A durable obligation was activated (a `PendingObligation` created).
+    ///
+    /// `data` carries `policyId`, `obligationId`, optional `triggerEvent`,
+    /// and optional `deadline` (Governance §16.2).
+    ObligationActivated,
+    /// A pending obligation was satisfied (discharged).
+    ///
+    /// `data` carries `policyId`, `obligationId`, and optional
+    /// `satisfyingActor`.
+    ObligationSatisfied,
+    /// A pending obligation was violated (by a `violateWhen` match or, when
+    /// distinct from expiry, a guarded event).
+    ///
+    /// `data` carries `policyId`, `obligationId`, `reason`, and
+    /// `effectiveAction` (the strictest applied action; Governance §16.2.4).
+    ObligationViolated,
+    /// A pending obligation was cancelled (a `cancelWhen` match).
+    ///
+    /// `data` carries `policyId` and `obligationId`.
+    ObligationCancelled,
+    /// A pending obligation expired at its deadline.
+    ///
+    /// `data` carries `policyId`, `obligationId`, and `effectiveAction`.
+    ObligationExpired,
+    /// A pending obligation was bypassed by an authorized actor.
+    ///
+    /// `data` carries `policyId`, `obligationId`, `bypassActor`, and
+    /// `rationale` (Governance §16.2.5).
+    ObligationBypassed,
+    /// A pre-breach warning fired for an obligation deadline.
+    ///
+    /// `data` carries `policyId`, `obligationId`, and `beforeBreach`. Does
+    /// not change obligation status.
+    ObligationWarning,
 }
 
 macro_rules! define_canonical_substrate_events {

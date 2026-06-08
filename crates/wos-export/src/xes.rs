@@ -694,8 +694,15 @@ mod tests {
             ProvenanceKind::CommitAttemptFailure,
             ProvenanceKind::AuthorizationRejected,
             ProvenanceKind::MigrationPinChanged,
+            ProvenanceKind::ObligationActivated,
+            ProvenanceKind::ObligationSatisfied,
+            ProvenanceKind::ObligationViolated,
+            ProvenanceKind::ObligationCancelled,
+            ProvenanceKind::ObligationExpired,
+            ProvenanceKind::ObligationBypassed,
+            ProvenanceKind::ObligationWarning,
         ];
-        assert_eq!(all.len(), 115);
+        assert_eq!(all.len(), 122);
 
         let mut log = ProvenanceLog::default();
         for kind in all {
