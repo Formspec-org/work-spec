@@ -26,10 +26,18 @@
 
 mod command;
 mod diagnostics;
+pub mod obligation_explain;
+pub mod obligation_graph;
 mod project;
 mod raw;
 
 pub use diagnostics::{AuthoringDiagnostic, Severity};
+pub use obligation_explain::{
+    explain_instance, explain_pending, explain_satisfied, explain_status, explain_violated,
+};
+pub use obligation_graph::{
+    obligation_graph, EdgeKind, NodeKind, ObligationGraph, ObligationGraphEdge, ObligationGraphNode,
+};
 pub use project::{AuthoringResult, WosProject};
 
 // Re-export the kernel types callers pass to `WosProject` helpers so they
