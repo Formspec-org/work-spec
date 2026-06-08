@@ -238,7 +238,17 @@ Gate: ADR 0067 Accepted 2026-05-06. Trellis Wave 39 closed; Formspec StatuteCloc
 
 ### Activation Criteria + Durable Obligations (ADR 0096)
 
-Multi-phase program turning the "STL-style workflow logic" discussion into WOS-native work: a reusable `ActivationCriteria` shape and durable pending obligations (`ObligationPolicy` → `PendingObligation`). **Framing/scope locked by [ADR 0096](thoughts/adr/0096-shared-activation-criteria-and-durable-obligations.md) (Accepted 2026-06-08)** — no STL/LTL in FEL; obligations live in the `governance` block on the `lifecycleHook`/`provenanceLayer` seams; existing DCR/SLA/milestone/deontic/policy-engine surfaces are not replaced. Execution follows the backlog's Phase 0–9 order across Epics 1–29 with skill-driven architecture-review gates between phases; the plan tracks the full ticket set. Phase 0 (this ADR + feature-matrix rows 1.11–1.14 + WOS-IMPLEMENTATION-STATUS §5 entry) is complete. Next: Phase 1 schema/prose foundations (`$defs/ActivationCriteria`, `$defs/ObligationPolicy`, `governance.obligationPolicies[]`).
+Multi-phase program turning the "STL-style workflow logic" discussion into WOS-native work: a reusable `ActivationCriteria` shape and durable pending obligations (`ObligationPolicy` → `PendingObligation`). **Framing/scope locked by [ADR 0096](thoughts/adr/0096-shared-activation-criteria-and-durable-obligations.md) (Accepted 2026-06-08)** — no STL/LTL in FEL; obligations live in the `governance` block on the `lifecycleHook`/`provenanceLayer` seams; existing DCR/SLA/milestone/deontic/policy-engine surfaces are not replaced.
+
+**Status (2026-06-08): Phases 0–9 landed on branch (PR #4).** Schema (`$defs/ActivationCriteria`, `ObligationPolicy`, `ObligationDeadline`, `ObligationViolationAction`, `PolicyObligationHandling`; `governance.obligationPolicies[]`); Governance §16 prose; `wos-core` model + deterministic activation evaluator; `wos-lint` `ACT-001..010` (draft); `wos-events` seven obligation `ProvenanceKind` variants + witness + PROV-O/XES/OCEL export; `wos-runtime` monitor in `drain_once` (activation/satisfy/cancel, pre-event violate-block, lazy deadline expiry, strictest-action gating, replay dedupe, count cap, fail-closed, bypass/extension authorizer); 13 `OBL-001..013` conformance fixtures (authored, not yet run); Phase-6 integrations (milestone/SLA/hold criteria, policy-engine materialization, AI bypass/independence). Closing docs/gates landed: `docs/obligation-conformance.md`, `docs/obligation-migration.md`, changelog + matrix updates, WOS-IMPLEMENTATION-STATUS §5, feature-matrix rows 1.11–1.14 → 🟦.
+
+**Remaining:**
+
+- [ ] **CI verification (WOS-GATE-2903/2904)** — the standalone repo cannot compile Rust (fel-core + private siblings absent); run the suite in the formspec-stack monorepo CI / `.github/workflows/rust-tests.yml` once the `STACK_REPOS_TOKEN` secret is set. Confirm `OBL-001..013` go green and `ACT-001..010` graduate from `draft` once FEL-backed fixtures land.
+- [ ] **SLA / Hold `ActivationCriteria` runtime wiring** — criteria shape composes today; SLA/Hold consumption of it is deferred.
+- [ ] **True business-day deadline expiry** — `WOS-OBL-TIME-1002` / `TIME-1008` (`P<N>BD` resolved against a named calendar; `OBL-010` is best-effort today).
+- [ ] **DCR per-activity activation gating** — `WOS-INTEG-DCR-1602` (`OBL-011` exercises only the plain activation path).
+- [ ] **Deadline-index performance work** — ticket 2801.
 
 
 

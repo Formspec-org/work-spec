@@ -177,4 +177,6 @@ A multi-agent handoff (WOS-INTEG-AI-1707) uses the same shape with no related sc
 - Concepts + canonical income-change example + "which primitive when": [`docs/activation-and-obligations.md`](activation-and-obligations.md)
 - Normative contract: [`specs/governance/workflow-governance.md` §16](../specs/governance/workflow-governance.md)
 - LLM authoring snippets (plain-language → policy JSON): [`docs/obligation-authoring-prompts.md`](obligation-authoring-prompts.md)
+- Migrating from hand-rolled timer + guard + milestone: [`docs/obligation-migration.md`](obligation-migration.md)
+- Conformance / fixture mapping: [`docs/obligation-conformance.md`](obligation-conformance.md)
 - Decision record: [`thoughts/adr/0096-shared-activation-criteria-and-durable-obligations.md`](../thoughts/adr/0096-shared-activation-criteria-and-durable-obligations.md)

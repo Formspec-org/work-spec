@@ -102,5 +102,7 @@ Use an obligation policy only if the duty spans events/actors/tasks or needs a d
 
 - Concepts + "which primitive when": [`docs/activation-and-obligations.md`](activation-and-obligations.md)
 - Worked event → provenance traces: [`docs/obligation-examples.md`](obligation-examples.md)
+- Migrating from hand-rolled timer + guard + milestone: [`docs/obligation-migration.md`](obligation-migration.md)
+- Conformance / fixture mapping: [`docs/obligation-conformance.md`](obligation-conformance.md)
 - Normative contract: [`specs/governance/workflow-governance.md` §16](../specs/governance/workflow-governance.md)
-- Lint: `ACT-001`/`ACT-002` (and catalogued `ACT-003..007`) in [`LINT-MATRIX.md`](../LINT-MATRIX.md)
+- Lint: `ACT-001..010` (all `draft`) in [`LINT-MATRIX.md`](../LINT-MATRIX.md)
