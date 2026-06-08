@@ -118,6 +118,8 @@ Prefer the narrower primitive when it fits; reach for an obligation policy when 
 
 ## See also
 
+- More worked examples (AI-review, due-process notice) with event → provenance traces: [`docs/obligation-examples.md`](obligation-examples.md)
+- LLM authoring snippets (plain-language → policy JSON, and when *not* to use a policy): [`docs/obligation-authoring-prompts.md`](obligation-authoring-prompts.md)
 - Normative contract: [`specs/governance/workflow-governance.md` §16](../specs/governance/workflow-governance.md)
 - Decision record: [`thoughts/adr/0096-shared-activation-criteria-and-durable-obligations.md`](../thoughts/adr/0096-shared-activation-criteria-and-durable-obligations.md)
 - Lint: `ACT-001`/`ACT-002` (and catalogued `ACT-003..007`) in [`LINT-MATRIX.md`](../LINT-MATRIX.md)
