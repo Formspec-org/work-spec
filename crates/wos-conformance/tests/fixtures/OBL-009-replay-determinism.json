@@ -1,0 +1,91 @@
+{
+  "_note": "AUTHORED-NOT-RUN (see OBL-001 _note). DETERMINISM: this fixture runs two full activate->satisfy cycles. Obligation ids are policyId#seq where seq counts all obligations ever materialized for the policy, so cycle 1 yields '#0' and cycle 2 yields '#1' deterministically (evaluate_activations). Provenance is appended in document/event order, so the record sequence is stable. TRUE REPLAY DETERMINISM (run the identical event stream twice and assert byte-identical final pending_obligations + provenance ORDER) cannot be expressed by the presence-only expected_provenance matcher; it needs a dedicated harness test that executes this fixture twice and asserts equal provenance kind/data sequences and equal final state. The expected_provenance below pins kinds+ids for a single run.",
+  "id": "WOS-CONF-2309-OBL-009-replay-determinism",
+  "rule": "WOS-OBL-RUNTIME-0916",
+  "description": "Determinism: two activate->satisfy cycles produce deterministic obligation ids (#0 then #1) and a stable provenance order; the basis for replay-identical traces (ADR 0096 §16.2; WOS-PERF-2803).",
+  "documents": {
+    "kernel": "inline"
+  },
+  "inline_documents": {
+    "kernel": {
+      "$wosWorkflow": "1.0",
+      "url": "urn:test:OBL-009",
+      "version": "1.0.0",
+      "title": "OBL-009 Replay Determinism",
+      "status": "active",
+      "impactLevel": "rightsImpacting",
+      "actors": [
+        { "id": "caseworker", "type": "human", "description": "Caseworker" },
+        { "id": "underwriter", "type": "human", "description": "Independent underwriter" }
+      ],
+      "lifecycle": {
+        "initialState": "open",
+        "states": {
+          "open": {
+            "type": "atomic",
+            "transitions": [
+              { "event": "caseFileUpdated", "target": "open" },
+              { "event": "underwritingReviewCompleted", "target": "open" }
+            ]
+          }
+        }
+      },
+      "caseFile": {
+        "fields": {
+          "income": { "type": "number" }
+        }
+      },
+      "governance": {
+        "obligationPolicies": [
+          {
+            "id": "income-change-review-required",
+            "activateWhen": { "on": { "event": "caseFileUpdated" }, "where": "event.field = 'income'" },
+            "satisfyWhen": {
+              "on": { "event": "underwritingReviewCompleted" },
+              "actor": { "role": "underwriter", "notSameAsTriggerActor": true }
+            },
+            "responsibleRole": "underwriter",
+            "duplicatePolicy": "ignoreWhilePending",
+            "onViolation": "block"
+          }
+        ]
+      },
+      "execution": {
+        "workflowTimeout": "P90D",
+        "defaultTaskTimeout": "P7D",
+        "instanceVersioning": "pinned"
+      }
+    }
+  },
+  "initial_case_state": {},
+  "event_sequence": [
+    { "event": "caseFileUpdated", "actor": "caseworker", "data": { "field": "income" } },
+    { "event": "underwritingReviewCompleted", "actor": "underwriter" },
+    { "event": "caseFileUpdated", "actor": "caseworker", "data": { "field": "income" } },
+    { "event": "underwritingReviewCompleted", "actor": "underwriter" }
+  ],
+  "expected_transitions": [
+    { "from": "open", "target": "open", "event": "caseFileUpdated" },
+    { "from": "open", "target": "open", "event": "underwritingReviewCompleted" },
+    { "from": "open", "target": "open", "event": "caseFileUpdated" },
+    { "from": "open", "target": "open", "event": "underwritingReviewCompleted" }
+  ],
+  "expected_provenance": [
+    {
+      "record_kind": "obligationActivated",
+      "data": { "policyId": "income-change-review-required", "obligationId": "income-change-review-required#0" }
+    },
+    {
+      "record_kind": "obligationSatisfied",
+      "data": { "policyId": "income-change-review-required", "obligationId": "income-change-review-required#0", "satisfyingActor": "underwriter" }
+    },
+    {
+      "record_kind": "obligationActivated",
+      "data": { "policyId": "income-change-review-required", "obligationId": "income-change-review-required#1" }
+    },
+    {
+      "record_kind": "obligationSatisfied",
+      "data": { "policyId": "income-change-review-required", "obligationId": "income-change-review-required#1", "satisfyingActor": "underwriter" }
+    }
+  ]
+}
