@@ -106,6 +106,72 @@ Notes:
 
 The same actor *may* send the notice here (no `notSameAsTriggerActor`), because due-process notice is an accountability act by the deciding office, not a separation-of-duties check — contrast §1, where independence is the point.
 
+## 3. Signature-before-release obligation — block payment until signed (WOS-INTEG-SIG-2001/2002)
+
+> When a payment is prepared, an approver's signature is required before the payment takes effect; the payment-effective event is blocked while the signature is pending. For multiple approvers, signing is sequential — each approver's signature activates the next approver's obligation.
+
+This composes the Signature Profile with a durable duty: a WOS `SignatureAffirmation` *satisfies* the obligation; the release event is gated by `violateWhen` + `block`. WOS does not invent a second meaning of "signed" — the obligation observes the same `SignatureAffirmation` + custody/export pipeline. Contract: [Governance §16.3 (Signature-before-release)](../specs/governance/workflow-governance.md).
+
+```json
+{
+  "governance": {
+    "obligationPolicies": [
+      {
+        "id": "payment-requires-approver-signature",
+        "description": "A prepared payment requires the approver's signature before it takes effect.",
+        "activateWhen": { "on": { "event": "paymentPrepared" } },
+        "satisfyWhen": {
+          "on": { "event": "signatureAffirmed" },
+          "actor": { "role": "approver" }
+        },
+        "violateWhen": { "on": { "event": "paymentEffective" } },
+        "deadline": { "within": "P2BD", "calendarRef": "urn:wos:calendar:federal-fy2026" },
+        "responsibleRole": "approver",
+        "duplicatePolicy": "ignoreWhilePending",
+        "onViolation": "block"
+      }
+    ]
+  }
+}
+```
+
+**Sequential signing (WOS-INTEG-SIG-2002):** to require approver-A then approver-B, chain a second policy whose `activateWhen` matches A's `signatureAffirmed` (`actor.role: approver-a`) and whose `satisfyWhen` matches B's (`actor.role: approver-b`, optionally `notSameAsTriggerActor: true`). Each `SignatureAffirmation` is the satisfaction of one obligation and the activation of the next, reproducing the Signature Profile signing order without duplicating signing semantics.
+
+**Event sequence → provenance:**
+
+| Event | Effect | Provenance |
+|---|---|---|
+| `paymentPrepared` | pending obligation created | `ObligationActivated` |
+| `paymentEffective` *(before signature)* | **blocked** | `ObligationViolated` (`effectiveAction: block`) |
+| `signatureAffirmed` (by `approver`) | discharged | `ObligationSatisfied` (+ `SignatureAffirmation` provenance, anchored Trellis-side) |
+| `paymentEffective` *(after signature)* | applied | *(ordinary transition provenance)* |
+
+## 4. Related-case dependency obligation — wait on a related case to resolve (WOS-INTEG-REL-2102)
+
+> A consolidation case cannot close until its related parent case is resolved; if the parent does not resolve within the window, escalate.
+
+The obligation activates on *this* case but is satisfied by an event surfaced from a *related* case (`on.eventScope: related`). A `deadline` bounds the wait so a never-resolving parent escalates rather than hanging. The obligation reads the related case's surfaced *event*, not its state (no related-case FEL — that stays forbidden by K-017).
+
+```json
+{
+  "governance": {
+    "obligationPolicies": [
+      {
+        "id": "await-parent-case-resolution",
+        "description": "This case cannot close until its related parent case resolves.",
+        "activateWhen": { "on": { "event": "closeRequested" } },
+        "satisfyWhen": { "on": { "event": "relatedCaseResolved", "eventScope": "related" } },
+        "deadline": { "within": "P10BD", "calendarRef": "urn:wos:calendar:federal-fy2026" },
+        "duplicatePolicy": "ignoreWhilePending",
+        "onViolation": "escalate"
+      }
+    ]
+  }
+}
+```
+
+A multi-agent handoff (WOS-INTEG-AI-1707) uses the same shape with no related scope: an orchestrator step activates a child-agent-completion obligation (`activateWhen` on `childAgentDispatched`), satisfied by the child's `childAgentCompleted` event (`actor.actorType: agent`, `notSameAsTriggerActor: true` so the dispatching parent cannot self-satisfy); the `deadline` routes non-completion to the fallback chain. No multi-agent engine is needed — the orchestrator is one kind of `AgentInvoker` (ADR 0064).
+
 ## See also
 
 - Concepts + canonical income-change example + "which primitive when": [`docs/activation-and-obligations.md`](activation-and-obligations.md)

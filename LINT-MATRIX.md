@@ -4,6 +4,8 @@
 
 > **Updated 2026-06-08 (ADR 0096 — activation criteria)** — registered T2 rules `ACT-001` (activation criteria `where` MUST be valid FEL) and `ACT-002` (boolean-shaped, mirrors AI-058), implemented in `fel_analysis.rs::check_obligation_activation_fel` over `governance.obligationPolicies[*].{activateWhen,satisfyWhen,cancelWhen,violateWhen}.where`. Both start `draft` (fixtures land with the OBL-* conformance batch, Phase 7). `ACT-003`..`ACT-007` are listed as the normative catalog (`planned`) and not yet registry-backed. fel-core sibling absent in sandbox; CI is authoritative for compilation.
 >
+> **Updated 2026-06-08 (ADR 0096 — durable-obligations integrations)** — added T2 rules `ACT-008` (WOS-INTEG-MILE-1302: milestone `activationCriteria.where` parse + boolean-shape via `fel_analysis.rs::check_milestone_activation_fel`, deliberately disjoint from K-013's `condition`), `ACT-009` (WOS-TOOL-2502: unreachable obligation satisfaction) and `ACT-010` (WOS-TOOL-2503: impossible violation action — `createTask.taskRef`/`emitEvent.event` resolution), both in `fel_analysis.rs::check_obligation_authoring`. All three start `draft`; unit tests added; fixtures land with the OBL-* batch. fel-core sibling absent in sandbox; CI is authoritative for compilation.
+>
 > **Updated 2026-05-03 (rebase reconcile)** — WS-094 graduations (`WOS-VER-LEVEL-001` → `tested`, `K-031`/`K-032` typed walks under `tier1.rs::transition_actor_and_initial_state_tests`) merged on top of the Studio Stages 3-7 base. K-051/K-053 stay `tested`, K-052 stays `draft`. T1 covers both K-016 (root + compound + region key resolution) and K-032 (root resolution; matrix description carries the broader compound coverage even though the typed function is root-only — gap tracked).
 >
 > **Updated 2026-05-02 (Stage-4 Rust impl)** — `K-051`/`K-052`/`K-053` Rust impl landed via the corrected Stage-4 plan at `thoughts/plans/2026-05-01-stage-4-decision-table-lint-rules.md`. **Wave 0** ships `wos_core::model::decision_table::{DecisionTable, DecisionTableGuard, HitPolicy, Guard}` plus the `Transition.guard` polymorphism refactor + `KernelDocument.decision_tables` field. **Wave 1'** ships `crates/wos-lint/tests/decision_table_fixtures.rs` loading the 10 K-05X conformance fixtures. **Wave 2'** ships `crates/wos-lint/src/rules/decision_table.rs` with K-051/K-052/K-053 implementations + per-rule unit tests. JSONPath shape standardized at `crates/wos-lint/src/diagnostic.rs:104` (slash format, RFC-6901-shaped). All three rules graduated to `tested`. Cargo build + tests SHOULD pass locally where parent `fel-core` is mounted; sandbox cannot verify.
@@ -103,6 +105,9 @@
 | `ACT-005` | ACT | draft | Activation/deadline `within` MUST be a valid ISO 8601 / `P<N>BD` duration. | — |
 | `ACT-006` | ACT | draft | Business-day `within` SHOULD declare a resolvable `calendarRef`. | — |
 | `ACT-007` | ACT | draft | `activationCriteriaRef` MUST resolve to a named criteria (no duplicate ids). | — |
+| `ACT-008` | ACT | draft | Milestone `activationCriteria.where` MUST be valid, boolean-shaped FEL (WOS-INTEG-MILE-1302; legacy `condition` stays K-013). | — |
+| `ACT-009` | ACT | draft | Obligation `satisfyWhen.on.event` SHOULD be reachable in the static event graph — unreachable satisfaction (WOS-TOOL-2502). | — |
+| `ACT-010` | ACT | draft | Obligation `onViolation.createTask.taskRef`/`emitEvent.event` MUST resolve to a known task/event (WOS-TOOL-2503). | — |
 | `AG-008` | AG | draft | Side-effect tools at `autonomous` autonomy MUST declare a `sideEffectPolicy`. | — |
 | `AG-010` | AG | draft | Verifiable constraints MUST satisfy all SMT subset restrictions (parse failures). | — |
 | `AG-011` | AG | draft | `let` bindings in verifiable expressions MUST NOT be recursive. | — |

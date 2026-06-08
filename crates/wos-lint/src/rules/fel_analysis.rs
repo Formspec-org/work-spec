@@ -97,6 +97,14 @@ fn check_workflow_fel(doc: &WosDocument, diagnostics: &mut Vec<LintDiagnostic>) 
     // duration validity, ACT-006 business-day calendar pairing, ACT-007
     // activationCriteriaRef resolution).
     check_obligation_activation_structure(doc, diagnostics);
+    // Milestone activationCriteria FEL (ACT-008 / WOS-INTEG-MILE-1302):
+    // the new optional `activationCriteria.where` on milestones runs the same
+    // FEL parse + boolean-shape checks as ACT-001/002, without duplicating the
+    // legacy `condition` check (K-013 owns `condition`).
+    check_milestone_activation_fel(doc, diagnostics);
+    // Obligation authoring lints (ACT-009 / WOS-TOOL-2502 unreachable
+    // satisfaction; ACT-010 / WOS-TOOL-2503 impossible violation action).
+    check_obligation_authoring(doc, diagnostics);
     // AI integration FEL (agent conditions, deontic expressions)
     check_ai_integration_fel(doc, diagnostics);
     // Advanced governance FEL (equity expressions, SMT constraints)
@@ -1228,6 +1236,207 @@ fn check_obligation_activation_structure(doc: &WosDocument, diagnostics: &mut Ve
             check_within_and_calendar(deadline, &base, diagnostics);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// ACT-008 (WOS-INTEG-MILE-1302): milestone activationCriteria FEL
+// ---------------------------------------------------------------------------
+
+/// ACT-008: a milestone's optional `activationCriteria.where` MUST be valid FEL
+/// (hard error) AND boolean-shaped (warning), reusing the same parse +
+/// `is_boolean_shaped` checks as ACT-001/002.
+///
+/// This deliberately does NOT touch the legacy milestone `condition` field —
+/// `K-013` (Kernel FEL, `check_milestones_fel`) owns `condition`, and emitting
+/// here would double-report. ACT-008 fires only over the new
+/// `activationCriteria` surface (ADR 0096; Governance §16.3).
+///
+/// Referenced criteria (`activationCriteriaRef`) carry no inline `where` and
+/// are skipped (their resolution is ACT-007's concern; milestones reuse the
+/// same `ActivationCriteria` shape).
+fn check_milestone_activation_fel(doc: &WosDocument, diagnostics: &mut Vec<LintDiagnostic>) {
+    let Some(milestones) = doc
+        .value
+        .pointer("/lifecycle/milestones")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    for (i, milestone) in milestones.iter().enumerate() {
+        // Only the inline activationCriteria carries a `where`; a ref form does not.
+        let Some(criteria) = milestone.get("activationCriteria") else {
+            continue;
+        };
+        let Some(expr_str) = criteria.get("where").and_then(Value::as_str) else {
+            continue;
+        };
+        let path = format!("/lifecycle/milestones/{i}/activationCriteria/where");
+        match parse(expr_str) {
+            Err(err) => {
+                diagnostics.push(LintDiagnostic::t2_error(
+                    "ACT-008",
+                    path,
+                    fel_parse_failure_message(
+                        "milestone activationCriteria `where` is not valid FEL",
+                        &err,
+                    ),
+                ));
+            }
+            Ok(expr) => {
+                if !is_boolean_shaped(&expr) {
+                    diagnostics.push(LintDiagnostic::t2_warning(
+                        "ACT-008",
+                        path,
+                        format!(
+                            "milestone activationCriteria `where` `{expr_str}` does not have a \
+                             boolean-shaped AST root; `where` must evaluate to a boolean \
+                             (Governance §16.1.2; non-boolean fails activation, no truthy \
+                             coercion)"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ACT-009 / ACT-010: obligation authoring lints
+// ---------------------------------------------------------------------------
+
+/// Obligation authoring lints over `governance.obligationPolicies[*]`:
+///
+/// - ACT-009 (WOS-TOOL-2502, warning): an obligation whose `satisfyWhen.on.event`
+///   names a static event that cannot occur (not in the workflow's static event
+///   graph) can never be discharged. A `$`-prefixed or `*` event name is a
+///   dynamic-event escape hatch and is never flagged (mirrors ACT-003).
+/// - ACT-010 (WOS-TOOL-2503, error): `onViolation.createTask.taskRef` MUST
+///   resolve to a known task (governance task catalog / `tasks` / contracts) and
+///   `onViolation.emitEvent.event` MUST be a valid (non-empty) event name in the
+///   static event graph (with the same dynamic-event escape hatch).
+fn check_obligation_authoring(doc: &WosDocument, diagnostics: &mut Vec<LintDiagnostic>) {
+    let Some(policies) = doc
+        .value
+        .pointer("/governance/obligationPolicies")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    let known_events = collect_known_events(&doc.value);
+    let known_tasks = collect_known_task_refs(&doc.value);
+
+    for (i, policy) in policies.iter().enumerate() {
+        // ACT-009: unreachable satisfaction.
+        if let Some(event) = policy
+            .pointer("/satisfyWhen/on/event")
+            .and_then(Value::as_str)
+        {
+            if let Some(events) = &known_events {
+                if event_is_statically_unreachable(event, events) {
+                    diagnostics.push(LintDiagnostic::t2_warning(
+                        "ACT-009",
+                        format!("/governance/obligationPolicies/{i}/satisfyWhen/on/event"),
+                        format!(
+                            "obligation `satisfyWhen` event '{event}' never occurs in the \
+                             workflow's static event graph, so this obligation can never be \
+                             satisfied; verify the event name or use a `$`-prefixed dynamic \
+                             event if it is raised externally (WOS-TOOL-2502; Governance §16.4)"
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // ACT-010: impossible violation action.
+        let Some(on_violation) = policy.get("onViolation") else {
+            continue;
+        };
+        let base = format!("/governance/obligationPolicies/{i}/onViolation");
+
+        // `onViolation` is either a bare string (`warn`/`escalate`/`fail`/`block`)
+        // or an object carrying `createTask` / `emitEvent`. A bare string has no
+        // refs to resolve.
+        if let Some(task_ref) = on_violation
+            .pointer("/createTask/taskRef")
+            .and_then(Value::as_str)
+        {
+            if !task_ref.is_empty() && !known_tasks.contains(task_ref) {
+                diagnostics.push(LintDiagnostic::t2_error(
+                    "ACT-010",
+                    format!("{base}/createTask/taskRef"),
+                    format!(
+                        "onViolation.createTask.taskRef '{task_ref}' does not resolve to a known \
+                         task (declare it under `governance.taskCatalog`/`governance.tasks` or a \
+                         contract) (WOS-TOOL-2503; Governance §16.4)"
+                    ),
+                ));
+            }
+        }
+        if let Some(emit_event) = on_violation
+            .pointer("/emitEvent/event")
+            .and_then(Value::as_str)
+        {
+            if emit_event.is_empty() {
+                diagnostics.push(LintDiagnostic::t2_error(
+                    "ACT-010",
+                    format!("{base}/emitEvent/event"),
+                    "onViolation.emitEvent.event is empty; it must name an event (WOS-TOOL-2503)"
+                        .to_string(),
+                ));
+            } else if let Some(events) = &known_events {
+                if event_is_statically_unreachable(emit_event, events) {
+                    diagnostics.push(LintDiagnostic::t2_error(
+                        "ACT-010",
+                        format!("{base}/emitEvent/event"),
+                        format!(
+                            "onViolation.emitEvent.event '{emit_event}' is not a workflow event \
+                             (no transition consumes it and no timer fires it); use a declared \
+                             event or a `$`-prefixed dynamic event (WOS-TOOL-2503; Governance §16.4)"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// True when `event` is a concrete name absent from the static event graph.
+///
+/// `$`-prefixed names and the `*` wildcard are dynamic / externally-raised and
+/// are never judged (mirrors the ACT-003 escape hatch).
+fn event_is_statically_unreachable(event: &str, known: &HashSet<String>) -> bool {
+    !event.is_empty() && !event.starts_with('$') && event != "*" && !known.contains(event)
+}
+
+/// Collect identifiers a `taskRef` may resolve to for ACT-010.
+///
+/// Sources: `governance.taskCatalog[*].id`, the keys of a legacy
+/// `governance.tasks` object, and the keys of the top-level `contracts` object
+/// (a contract may stand in for a task binding). Absent sources contribute
+/// nothing; an unknown `taskRef` is judged against whatever is present.
+fn collect_known_task_refs(root: &Value) -> HashSet<String> {
+    let mut refs = HashSet::new();
+    if let Some(catalog) = root
+        .pointer("/governance/taskCatalog")
+        .and_then(Value::as_array)
+    {
+        for task in catalog {
+            if let Some(id) = task.get("id").and_then(Value::as_str) {
+                refs.insert(id.to_string());
+            }
+        }
+    }
+    if let Some(tasks) = root.pointer("/governance/tasks").and_then(Value::as_object) {
+        for key in tasks.keys() {
+            refs.insert(key.clone());
+        }
+    }
+    if let Some(contracts) = root.get("contracts").and_then(Value::as_object) {
+        for key in contracts.keys() {
+            refs.insert(key.clone());
+        }
+    }
+    refs
 }
 
 /// Run the body-level checks (ACT-003/004/005/006) over an inline
@@ -2877,6 +3086,223 @@ mod tests {
         assert!(
             !diag.iter().any(|d| d.rule_id == "ACT-007"),
             "unexpected ACT-007 for external URI: {diag:?}"
+        );
+    }
+
+    // --- ACT-008: milestone activationCriteria FEL (WOS-INTEG-MILE-1302) ---
+
+    fn workflow_with_milestone(milestone: serde_json::Value) -> WosDocument {
+        make_doc(
+            DocumentKind::Workflow,
+            json!({
+                "$wosWorkflow": true,
+                "lifecycle": {
+                    "states": { "open": {} },
+                    "milestones": [milestone]
+                }
+            }),
+        )
+    }
+
+    #[test]
+    fn act008_valid_boolean_where_is_clean() {
+        let doc = workflow_with_milestone(json!({
+            "id": "m1",
+            "activationCriteria": { "where": "$amount > 0" }
+        }));
+        let mut diag = Vec::new();
+        check_milestone_activation_fel(&doc, &mut diag);
+        assert!(
+            !diag.iter().any(|d| d.rule_id == "ACT-008"),
+            "unexpected ACT-008: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act008_invalid_where_errors() {
+        let doc = workflow_with_milestone(json!({
+            "id": "m1",
+            "activationCriteria": { "where": ">>> broken <<<" }
+        }));
+        let mut diag = Vec::new();
+        check_milestone_activation_fel(&doc, &mut diag);
+        assert!(
+            diag.iter()
+                .any(|d| d.rule_id == "ACT-008" && d.severity == LintSeverity::Error),
+            "expected ACT-008 error: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act008_non_boolean_where_warns() {
+        let doc = workflow_with_milestone(json!({
+            "id": "m1",
+            "activationCriteria": { "where": "$amount" }
+        }));
+        let mut diag = Vec::new();
+        check_milestone_activation_fel(&doc, &mut diag);
+        assert!(
+            diag.iter()
+                .any(|d| d.rule_id == "ACT-008" && d.severity == LintSeverity::Warning),
+            "expected ACT-008 warning: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act008_does_not_touch_legacy_condition() {
+        // A milestone with only the legacy `condition` (no activationCriteria)
+        // must NOT trip ACT-008 — K-013 owns `condition`.
+        let doc = workflow_with_milestone(json!({
+            "id": "m1",
+            "condition": ">>> broken <<<"
+        }));
+        let mut diag = Vec::new();
+        check_milestone_activation_fel(&doc, &mut diag);
+        assert!(
+            !diag.iter().any(|d| d.rule_id == "ACT-008"),
+            "unexpected ACT-008 on legacy condition: {diag:?}"
+        );
+    }
+
+    // --- ACT-009 / ACT-010: obligation authoring lints ---
+
+    fn workflow_with_policy(policy: serde_json::Value) -> WosDocument {
+        make_doc(
+            DocumentKind::Workflow,
+            json!({
+                "$wosWorkflow": true,
+                "lifecycle": {
+                    "states": {
+                        "open": {
+                            "transitions": [
+                                { "event": "prepared", "target": "review" },
+                                { "event": "signed", "target": "done" }
+                            ]
+                        },
+                        "review": {},
+                        "done": {}
+                    }
+                },
+                "governance": {
+                    "taskCatalog": [{ "id": "reviewTask" }],
+                    "obligationPolicies": [policy]
+                }
+            }),
+        )
+    }
+
+    #[test]
+    fn act009_reachable_satisfaction_is_clean() {
+        let doc = workflow_with_policy(json!({
+            "id": "p1",
+            "activateWhen": { "on": { "event": "prepared" } },
+            "satisfyWhen": { "on": { "event": "signed" } },
+            "onViolation": "block"
+        }));
+        let mut diag = Vec::new();
+        check_obligation_authoring(&doc, &mut diag);
+        assert!(
+            !diag.iter().any(|d| d.rule_id == "ACT-009"),
+            "unexpected ACT-009: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act009_unreachable_satisfaction_warns() {
+        let doc = workflow_with_policy(json!({
+            "id": "p1",
+            "activateWhen": { "on": { "event": "prepared" } },
+            "satisfyWhen": { "on": { "event": "neverHappens" } },
+            "onViolation": "block"
+        }));
+        let mut diag = Vec::new();
+        check_obligation_authoring(&doc, &mut diag);
+        assert!(
+            diag.iter()
+                .any(|d| d.rule_id == "ACT-009" && d.severity == LintSeverity::Warning),
+            "expected ACT-009 warning: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act009_dynamic_satisfaction_escape_hatch_is_clean() {
+        let doc = workflow_with_policy(json!({
+            "id": "p1",
+            "activateWhen": { "on": { "event": "prepared" } },
+            "satisfyWhen": { "on": { "event": "$externalSignal" } },
+            "onViolation": "block"
+        }));
+        let mut diag = Vec::new();
+        check_obligation_authoring(&doc, &mut diag);
+        assert!(
+            !diag.iter().any(|d| d.rule_id == "ACT-009"),
+            "unexpected ACT-009 on dynamic event: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act010_known_task_ref_is_clean() {
+        let doc = workflow_with_policy(json!({
+            "id": "p1",
+            "activateWhen": { "on": { "event": "prepared" } },
+            "satisfyWhen": { "on": { "event": "signed" } },
+            "onViolation": { "createTask": { "taskRef": "reviewTask" } }
+        }));
+        let mut diag = Vec::new();
+        check_obligation_authoring(&doc, &mut diag);
+        assert!(
+            !diag.iter().any(|d| d.rule_id == "ACT-010"),
+            "unexpected ACT-010: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act010_unknown_task_ref_errors() {
+        let doc = workflow_with_policy(json!({
+            "id": "p1",
+            "activateWhen": { "on": { "event": "prepared" } },
+            "satisfyWhen": { "on": { "event": "signed" } },
+            "onViolation": { "createTask": { "taskRef": "noSuchTask" } }
+        }));
+        let mut diag = Vec::new();
+        check_obligation_authoring(&doc, &mut diag);
+        assert!(
+            diag.iter()
+                .any(|d| d.rule_id == "ACT-010" && d.severity == LintSeverity::Error),
+            "expected ACT-010 error for unknown taskRef: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act010_invalid_emit_event_errors() {
+        let doc = workflow_with_policy(json!({
+            "id": "p1",
+            "activateWhen": { "on": { "event": "prepared" } },
+            "satisfyWhen": { "on": { "event": "signed" } },
+            "onViolation": { "emitEvent": { "event": "bogusEvent" } }
+        }));
+        let mut diag = Vec::new();
+        check_obligation_authoring(&doc, &mut diag);
+        assert!(
+            diag.iter()
+                .any(|d| d.rule_id == "ACT-010" && d.severity == LintSeverity::Error),
+            "expected ACT-010 error for unknown emitEvent: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act010_bare_string_on_violation_is_clean() {
+        let doc = workflow_with_policy(json!({
+            "id": "p1",
+            "activateWhen": { "on": { "event": "prepared" } },
+            "satisfyWhen": { "on": { "event": "signed" } },
+            "onViolation": "escalate"
+        }));
+        let mut diag = Vec::new();
+        check_obligation_authoring(&doc, &mut diag);
+        assert!(
+            !diag.iter().any(|d| d.rule_id == "ACT-010"),
+            "unexpected ACT-010 on bare-string onViolation: {diag:?}"
         );
     }
 

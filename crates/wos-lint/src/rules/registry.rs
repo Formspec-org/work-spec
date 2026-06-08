@@ -177,6 +177,42 @@ static ALL_LINT_RULES: &[RuleMetadata] = &[
             "Point `activationCriteriaRef` at an existing local `#/$defs/...` node or a valid URI.",
         ),
     },
+    RuleMetadata {
+        id: "ACT-008",
+        tier: Tier::T2,
+        severity: LintSeverity::Error,
+        summary: "Milestone `activationCriteria.where` MUST be valid, boolean-shaped FEL (WOS-INTEG-MILE-1302).",
+        fixtures: &[],
+        graduation: Graduation::Draft,
+        spec_ref: Some("governance/workflow-governance.md#16.3"),
+        suggested_fix: Some(
+            "Make the milestone `activationCriteria.where` a valid boolean FEL expression; the legacy `condition` field stays under K-013.",
+        ),
+    },
+    RuleMetadata {
+        id: "ACT-009",
+        tier: Tier::T2,
+        severity: LintSeverity::Warning,
+        summary: "Obligation `satisfyWhen.on.event` SHOULD be reachable in the static event graph (WOS-TOOL-2502).",
+        fixtures: &[],
+        graduation: Graduation::Draft,
+        spec_ref: Some("governance/workflow-governance.md#16.4"),
+        suggested_fix: Some(
+            "Name a satisfaction event the workflow can raise, or use a `$`-prefixed dynamic event for externally-raised events.",
+        ),
+    },
+    RuleMetadata {
+        id: "ACT-010",
+        tier: Tier::T2,
+        severity: LintSeverity::Error,
+        summary: "Obligation `onViolation.createTask.taskRef`/`emitEvent.event` MUST resolve (WOS-TOOL-2503).",
+        fixtures: &[],
+        graduation: Graduation::Draft,
+        spec_ref: Some("governance/workflow-governance.md#16.4"),
+        suggested_fix: Some(
+            "Point `createTask.taskRef` at a known task (taskCatalog/tasks/contracts) and `emitEvent.event` at a valid event name.",
+        ),
+    },
     // --- AG (Advanced Governance) -------------------------------------
     RuleMetadata {
         id: "AG-008",
