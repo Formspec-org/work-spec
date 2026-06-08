@@ -602,6 +602,102 @@ pub fn evaluate_cancellations(
     records
 }
 
+/// Outcome of an attempted administrative obligation bypass (WOS-INTEG-AI-1706).
+#[derive(Debug)]
+pub enum BypassOutcome {
+    /// The obligation was bypassed by a permitted (non-agent) actor; carries the
+    /// emitted `ObligationViolated`/bypass provenance and the obligation id.
+    Bypassed(Vec<ProvenanceRecord>),
+    /// The bypass was REFUSED because the requesting actor is an agent
+    /// (WOS-INTEG-AI-1706: agents MUST NOT bypass an obligation by default). The
+    /// obligation remains `Pending`; the returned records witness the refused
+    /// attempt (tamper/violation provenance) for the audit trail.
+    RefusedAgent(Vec<ProvenanceRecord>),
+    /// No pending obligation with that id was found; no state change.
+    NotFound,
+}
+
+/// Administrative bypass of a pending obligation, guarded against agent actors
+/// (WOS-INTEG-AI-1706).
+///
+/// WOS has no implicit bypass path: an obligation discharges only through
+/// `satisfyWhen`/`cancelWhen`/deadline expiry. This helper is the ONLY
+/// privileged escape hatch, and it is deliberately fenced:
+///
+/// - An **agent** actor (`ActorKind::Agent`) can NEVER bypass an obligation by
+///   default. The attempt is refused, the obligation stays `Pending`, and a
+///   tamper/`ObligationViolated` provenance record witnesses the refusal so the
+///   audit trail shows an agent tried to escape a durable duty.
+/// - A non-agent (human/system) actor with explicit authority may bypass; the
+///   obligation transitions to `Bypassed` and a provenance record is emitted.
+///
+/// The runtime drain does not call this on the normal event path (there is no
+/// bypass-by-default); it is invoked only by an explicit administrative command.
+pub fn bypass_obligation(
+    instance: &mut WorkflowProcess,
+    obligation_id: &str,
+    actor_id: Option<&str>,
+    actor_type: Option<ActorKind>,
+    reason: &str,
+) -> BypassOutcome {
+    // Locate the pending obligation by id.
+    let idx = instance
+        .governance_state
+        .as_ref()
+        .and_then(|g| {
+            g.pending_obligations
+                .iter()
+                .position(|o| o.obligation_id == obligation_id && o.status == ObligationStatus::Pending)
+        });
+    let Some(i) = idx else {
+        return BypassOutcome::NotFound;
+    };
+    let (policy_id, _oid, _trigger) = match pending_snapshot(instance, i) {
+        Some(s) => s,
+        None => return BypassOutcome::NotFound,
+    };
+    let (deadline, responsible_actor, responsible_role) = obligation_witness_fields(instance, i);
+
+    // WOS-INTEG-AI-1706: agents MUST NOT bypass an obligation. Refuse and witness
+    // the attempt as a tamper/violation; the obligation is left Pending.
+    if actor_type == Some(ActorKind::Agent) {
+        let record = ProvenanceRecord::obligation_violated(
+            &policy_id,
+            obligation_id,
+            "agent actor attempted to bypass a pending obligation (refused; WOS-INTEG-AI-1706)",
+            "block",
+            ObligationViolationWitness {
+                trigger_event: None,
+                deadline: deadline.as_deref(),
+                responsible_actor: responsible_actor.as_deref(),
+                responsible_role: responsible_role.as_deref(),
+                event_witness: None,
+                case_state_witness: None,
+            },
+        );
+        return BypassOutcome::RefusedAgent(vec![record]);
+    }
+
+    // Permitted (non-agent) bypass: transition to Bypassed and witness it. The
+    // ObligationViolated record carries the human/system rationale.
+    set_status(instance, i, ObligationStatus::Bypassed);
+    let record = ProvenanceRecord::obligation_violated(
+        &policy_id,
+        obligation_id,
+        reason,
+        "bypass",
+        ObligationViolationWitness {
+            trigger_event: None,
+            deadline: deadline.as_deref(),
+            responsible_actor: actor_id.or(responsible_actor.as_deref()),
+            responsible_role: responsible_role.as_deref(),
+            event_witness: None,
+            case_state_witness: None,
+        },
+    );
+    BypassOutcome::Bypassed(vec![record])
+}
+
 // ── Internal helpers (snapshot-then-mutate to keep borrows disjoint) ────────
 
 fn pending_len(instance: &WorkflowProcess) -> usize {
@@ -1254,6 +1350,111 @@ mod tests {
         // Re-scan in the same window: deduped, no re-fire.
         let again = evaluate_deadline_warnings(&policies, &mut inst, day + day / 2 + 1);
         assert!(again.is_empty(), "threshold fires once");
+    }
+
+    // ── WOS-INTEG-AI-1705: same-agent independence flows via trigger_actor_id ─
+
+    #[test]
+    fn agent_trigger_actor_cannot_self_satisfy() {
+        let policies = policies_from(income_policy_json());
+        let mut inst = bare_instance();
+        let cs = serde_json::json!({});
+        let ed = serde_json::json!({ "field": "income" });
+        // An AGENT actor triggers the obligation; its id is recorded as the
+        // trigger actor on the PendingObligation.
+        let mut act = event("caseFileUpdated", Some(&ed), &cs, Some("agent-7"), &[]);
+        act.actor_type = Some(ActorKind::Agent);
+        evaluate_activations(&policies, &mut inst, &act);
+        assert_eq!(
+            inst.governance_state.as_ref().unwrap().pending_obligations[0]
+                .trigger_actor_id
+                .as_deref(),
+            Some("agent-7"),
+            "the acting agent id must flow as trigger_actor_id"
+        );
+
+        // The same agent attempts to satisfy → notSameAsTriggerActor blocks it.
+        let roles = vec!["underwriter".to_string()];
+        let mut same = event("underwritingReviewCompleted", None, &cs, Some("agent-7"), &roles);
+        same.actor_type = Some(ActorKind::Agent);
+        let recs_same = evaluate_satisfactions(&policies, &mut inst, &same);
+        assert!(recs_same.is_empty(), "the triggering agent must not self-satisfy");
+        assert_eq!(
+            inst.governance_state.as_ref().unwrap().pending_obligations[0].status,
+            ObligationStatus::Pending
+        );
+
+        // A different underwriter (independent actor) satisfies it.
+        let other = event("underwritingReviewCompleted", None, &cs, Some("underwriter-2"), &roles);
+        let recs = evaluate_satisfactions(&policies, &mut inst, &other);
+        assert_eq!(recs.len(), 1);
+    }
+
+    // ── WOS-INTEG-AI-1706: agents MUST NOT bypass an obligation by default ───
+
+    #[test]
+    fn agent_bypass_is_refused_and_witnessed() {
+        let policies = policies_from(income_policy_json());
+        let mut inst = bare_instance();
+        let cs = serde_json::json!({});
+        let ed = serde_json::json!({ "field": "income" });
+        evaluate_activations(
+            &policies,
+            &mut inst,
+            &event("caseFileUpdated", Some(&ed), &cs, Some("caseworker-1"), &[]),
+        );
+        let oid = inst.governance_state.as_ref().unwrap().pending_obligations[0]
+            .obligation_id
+            .clone();
+
+        let outcome = bypass_obligation(
+            &mut inst,
+            &oid,
+            Some("agent-9"),
+            Some(ActorKind::Agent),
+            "agent self-clearing",
+        );
+        match outcome {
+            BypassOutcome::RefusedAgent(records) => {
+                assert_eq!(records.len(), 1);
+                assert_eq!(records[0].record_kind, ProvenanceKind::ObligationViolated);
+            }
+            other => panic!("expected RefusedAgent, got {other:?}"),
+        }
+        // The obligation is untouched — still Pending.
+        assert_eq!(
+            inst.governance_state.as_ref().unwrap().pending_obligations[0].status,
+            ObligationStatus::Pending
+        );
+    }
+
+    #[test]
+    fn human_bypass_is_permitted_and_transitions() {
+        let policies = policies_from(income_policy_json());
+        let mut inst = bare_instance();
+        let cs = serde_json::json!({});
+        let ed = serde_json::json!({ "field": "income" });
+        evaluate_activations(
+            &policies,
+            &mut inst,
+            &event("caseFileUpdated", Some(&ed), &cs, Some("caseworker-1"), &[]),
+        );
+        let oid = inst.governance_state.as_ref().unwrap().pending_obligations[0]
+            .obligation_id
+            .clone();
+
+        let outcome = bypass_obligation(
+            &mut inst,
+            &oid,
+            Some("supervisor-2"),
+            Some(ActorKind::Human),
+            "documented administrative override",
+        );
+        assert!(matches!(outcome, BypassOutcome::Bypassed(_)));
+        assert_eq!(
+            inst.governance_state.as_ref().unwrap().pending_obligations[0].status,
+            ObligationStatus::Bypassed
+        );
     }
 
     #[test]
