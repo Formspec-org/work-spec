@@ -11,6 +11,8 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 
+use crate::model::activation::ActivationCriteria;
+
 /// Governance content — the embedded `governance` block of a $wosWorkflow
 /// document per ADR 0076 D-1. Was a standalone document with
 /// `$wosWorkflowGovernance` marker; the marker now lives on the envelope
@@ -649,6 +651,20 @@ pub struct HoldPolicy {
 
     /// Event that resumes from this hold.
     pub resume_trigger: String,
+
+    /// Optional activation criteria that resumes the case from this hold,
+    /// offered additively alongside `resume_trigger` (ADR 0096;
+    /// WOS-INTEG-HOLD-1501). When present, the case resumes on the first match
+    /// (e.g. an event plus an FEL guard, an actor constraint, or — via
+    /// `on.event_scope == related` — a related-case event for a
+    /// `pending-related-case` hold). Backward-compatible: `resume_trigger`
+    /// stays required for non-legal holds and governs when this is absent.
+    #[serde(
+        default,
+        rename = "resumeWhen",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub resume_when: Option<ActivationCriteria>,
 
     /// Action when duration expires without resume trigger.
     pub timeout_action: TimeoutAction,

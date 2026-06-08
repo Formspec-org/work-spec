@@ -9001,6 +9001,19 @@
           "x-wos": {
             "openStringKind": "tagLabel"
           }
+        },
+        "eventScope": {
+          "type": "string",
+          "enum": [
+            "this",
+            "related"
+          ],
+          "default": "this",
+          "description": "Scopes which case's events this trigger matches (ADR 0096; WOS-INTEG-REL-2101). `this` (default) matches only events on the case the criteria is evaluated for. `related` widens matching to events surfaced from a related case (e.g. `$related.*` events bridged in by a `pending-related-case` hold or a cross-case linkage), so a duty can be activated or discharged by something that happens on a linked case. Backward-compatible: absent means `this`, the historical behavior. Cross-case event resolution against declared case relationships is checked by lint ACT-008.",
+          "examples": [
+            "this",
+            "related"
+          ]
         }
       }
     },
@@ -9578,6 +9591,10 @@
         "onViolation": {
           "$ref": "#/$defs/ObligationViolationAction",
           "description": "Action applied on violation (deadline expiry or `violateWhen`). REQUIRED."
+        },
+        "obligationHandling": {
+          "$ref": "#/$defs/PolicyObligationHandling",
+          "description": "Optional. Configures how an external policy-engine obligation directive (`PolicyDecision.obligations[]`, the runtime integration boundary — Governance §16.3) is handled when it correlates to this policy. `recordOnly` (the default behavior when absent) records the directive in provenance without creating a pending obligation; `{ \"mode\": \"materialize\", \"templateRef\": \"<uri>\" }` materializes it into a `PendingObligation` from the named template. An `indeterminate` policy decision is never coerced into an obligation (Governance §16.3). Additive (ADR 0096; WOS-INTEG-POLICY-1801)."
         }
       },
       "allOf": [
@@ -9634,6 +9651,60 @@
       "x-lm": {
         "critical": true,
         "intent": "Durable cross-event duty. `activateWhen`/`satisfyWhen` required; add `violateWhen`+`onViolation: block` to gate a premature event; add `deadline` to time-bound it. Each clause is an ActivationCriteria — never temporal logic. Distinct from deontic `Obligation` and policy-engine obligations."
+      }
+    },
+    "PolicyObligationHandling": {
+      "description": "How an external policy-engine obligation directive (`PolicyDecision.obligations[]`, the runtime integration boundary — Governance §16.3) is handled when it correlates to an obligation policy. Either the bare string `recordOnly` (record the directive in provenance, create no pending obligation — the conservative default) or an object selecting `materialize` mode with a `templateRef` that names the obligation template to instantiate. An `indeterminate` policy decision is never coerced into an obligation (ADR 0096; WOS-INTEG-POLICY-1801).",
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "recordOnly",
+          "description": "Record the policy-engine obligation directive in provenance without creating a `PendingObligation`. The conservative default; equivalent to omitting `obligationHandling`."
+        },
+        {
+          "type": "object",
+          "required": [
+            "mode",
+            "templateRef"
+          ],
+          "additionalProperties": false,
+          "patternProperties": {
+            "^x-": {
+              "$comment": "Vendor extensions per Kernel spec §10.6"
+            }
+          },
+          "description": "Materialize the policy-engine obligation directive into a `PendingObligation` from the named template.",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "materialize",
+              "description": "Selects materialization: the correlated policy-engine obligation directive is turned into a `PendingObligation`."
+            },
+            "templateRef": {
+              "type": "string",
+              "format": "uri",
+              "minLength": 1,
+              "description": "URI of the obligation template the directive materializes into. Resolved at load/lint time, not lazily at runtime (same convention as `activationCriteriaRef`); an unresolved reference is a lint/runtime rejection.",
+              "examples": [
+                "urn:wos:obligation-template:policy-engine-directive",
+                "https://agency.gov/wos/obligation-templates/decision-directive"
+              ],
+              "x-wos": {
+                "openStringKind": "uri"
+              }
+            }
+          }
+        }
+      ],
+      "examples": [
+        "recordOnly",
+        {
+          "mode": "materialize",
+          "templateRef": "urn:wos:obligation-template:policy-engine-directive"
+        }
+      ],
+      "x-lm": {
+        "intent": "Bridge from a runtime policy-engine obligation directive to WOS durable obligations. Use `recordOnly` to log without materializing, or `{ mode: materialize, templateRef }` to instantiate a pending obligation. Never coerces an `indeterminate` decision."
       }
     },
     "SlaDefinition": {
@@ -9719,6 +9790,18 @@
           "examples": [
             "applicantResponseReceived",
             "caseReadyForReview"
+          ]
+        },
+        "startWhen": {
+          "$ref": "#/$defs/ActivationCriteria",
+          "description": "Optional. An ActivationCriteria whose match starts the SLA clock, offered additively alongside the existing `startAt`/`startEvent` pair (ADR 0096; WOS-INTEG-SLA-1401). When present, the clock starts on the first match of this criteria (e.g. an event plus an FEL guard, or an actor/required-data gate) rather than on a bare `startAt` lifecycle point or `startEvent` name. The `within` clause of the criteria is ignored here — `expectedDuration` is the authoritative SLA window. Backward-compatible: `startAt`/`startEvent` remain required and govern when `startWhen` is absent.",
+          "examples": [
+            {
+              "on": {
+                "event": "caseFileUpdated"
+              },
+              "where": "event.field = 'income'"
+            }
           ]
         }
       },
@@ -10313,6 +10396,18 @@
           "x-wos": {
             "openStringKind": "tagLabel"
           }
+        },
+        "resumeWhen": {
+          "$ref": "#/$defs/ActivationCriteria",
+          "description": "Optional. An ActivationCriteria that resumes the case from this hold, offered additively alongside the existing `resumeTrigger` event name (ADR 0096; WOS-INTEG-HOLD-1501). When present, the case resumes on the first match (e.g. an event plus an FEL guard, an actor constraint, or — with `on.eventScope: related` — a related-case event for a `pending-related-case` hold). Backward-compatible: `resumeTrigger` is still required (except for `legal-hold`) and governs when `resumeWhen` is absent; the two are complementary, not mutually exclusive. Like `resumeTrigger`, this is event-driven, not a polled FEL condition.",
+          "examples": [
+            {
+              "on": {
+                "event": "relatedCaseClosed",
+                "eventScope": "related"
+              }
+            }
+          ]
         },
         "timeoutAction": {
           "type": "string",

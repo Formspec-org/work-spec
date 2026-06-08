@@ -34,6 +34,22 @@ pub struct ActivationTrigger {
     /// Transition semantic tag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition_tag: Option<String>,
+    /// Which case's events this trigger matches (ADR 0096; WOS-INTEG-REL-2101).
+    /// `this` (default) matches only events on the case being evaluated;
+    /// `related` widens matching to related-case events (e.g. `$related.*`).
+    /// Absent means `this` (backward-compatible).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_scope: Option<EventScope>,
+}
+
+/// Scope of events an [`ActivationTrigger`] matches (WOS-INTEG-REL-2101).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EventScope {
+    /// Only events on the case the criteria is evaluated for (default).
+    This,
+    /// Also events surfaced from a related case (`$related.*`).
+    Related,
 }
 
 /// Kernel event family (BPMN-derived taxonomy).

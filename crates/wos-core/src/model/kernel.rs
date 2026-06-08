@@ -23,6 +23,7 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 
+use crate::model::activation::ActivationCriteria;
 use crate::model::decision_table::{DecisionTable, Guard};
 pub use wos_events::{ActorKind, AuditLayer, MutationSource, VerificationLevel};
 
@@ -1146,4 +1147,18 @@ pub struct Milestone {
         skip_serializing_if = "Option::is_none"
     )]
     pub trigger_mode: Option<String>,
+
+    /// Optional activation criteria offered additively alongside the FEL
+    /// `condition` (ADR 0096; WOS-INTEG-MILE-1301). When present, the milestone
+    /// fires when this reusable activation predicate matches (event/transition
+    /// trigger, actor constraint, required-data presence, and/or FEL guard)
+    /// rather than purely on the `condition` write-settled evaluation.
+    /// Backward-compatible: `condition` remains required and governs when
+    /// `activationCriteria` is absent.
+    #[serde(
+        default,
+        rename = "activationCriteria",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub activation_criteria: Option<ActivationCriteria>,
 }
