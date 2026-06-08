@@ -14,9 +14,10 @@ use wos_core::{ActorKind, ProvenanceKind, ProvenanceRecord};
 
 use crate::milestones::{MilestoneEventContext, evaluate_milestones_with_event};
 use crate::obligations::{
-    ObligationEvent, ObligationTaskRequest, ViolationEffects, evaluate_activations,
-    evaluate_cancellations, evaluate_deadline_expiries, evaluate_deadline_warnings,
-    evaluate_pre_event_gate, evaluate_satisfactions, load_obligation_policies,
+    ObligationEvent, ObligationMonitorConfig, ObligationTaskRequest, ViolationEffects,
+    evaluate_activations, evaluate_cancellations, evaluate_deadline_expiries,
+    evaluate_deadline_warnings, evaluate_pre_event_gate, evaluate_satisfactions,
+    load_obligation_policies,
 };
 
 use wos_core::instance::{ActiveTask, ActiveTaskStatus, PendingEvent, WorkflowProcess};
@@ -426,6 +427,7 @@ impl WosRuntime {
                 &obligation_policies,
                 &mut record.process,
                 &obl_event,
+                ObligationMonitorConfig::default(),
             ));
         }
 

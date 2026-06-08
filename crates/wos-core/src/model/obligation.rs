@@ -506,6 +506,56 @@ mod tests {
         assert!(v.get("pendingObligations").is_none());
     }
 
+    // ── WOS-MIG-2601: full process JSON written before obligations existed ───
+
+    #[test]
+    fn process_json_without_obligation_fields_round_trips() {
+        // A `governanceState` written before either obligation field existed
+        // (no `pendingObligations`, no `seenObligationActivationKeys`) MUST
+        // deserialize, default both to empty, and re-serialize without either
+        // key (round-trip stable).
+        let gs: crate::instance::GovernanceState = serde_json::from_value(serde_json::json!({
+            "activeDelegations": [{
+                "delegatorId": "a",
+                "delegateId": "b",
+                "scope": "review",
+                "grantedAt": "2026-06-08T00:00:00Z"
+            }],
+            "activeHolds": [],
+            "reviewState": { "binding-1": { "phase": "open" } }
+        }))
+        .unwrap();
+        assert!(gs.pending_obligations.is_empty());
+        assert!(gs.seen_obligation_activation_keys.is_empty());
+
+        let v = serde_json::to_value(&gs).unwrap();
+        assert!(v.get("pendingObligations").is_none());
+        assert!(v.get("seenObligationActivationKeys").is_none());
+        // The pre-existing fields are preserved across the round-trip.
+        assert_eq!(v["activeDelegations"][0]["delegatorId"], serde_json::json!("a"));
+
+        let back: crate::instance::GovernanceState = serde_json::from_value(v).unwrap();
+        assert!(back.pending_obligations.is_empty());
+        assert!(back.seen_obligation_activation_keys.is_empty());
+    }
+
+    #[test]
+    fn governance_state_round_trips_with_seen_activation_keys() {
+        let mut gs = crate::instance::GovernanceState::default();
+        gs.seen_obligation_activation_keys
+            .push("income-change-review-required#tok-1".to_string());
+        let v = serde_json::to_value(&gs).unwrap();
+        assert_eq!(
+            v["seenObligationActivationKeys"][0],
+            serde_json::json!("income-change-review-required#tok-1")
+        );
+        let back: crate::instance::GovernanceState = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            back.seen_obligation_activation_keys,
+            gs.seen_obligation_activation_keys
+        );
+    }
+
     #[test]
     fn governance_state_round_trips_with_pending_obligation() {
         let mut gs = crate::instance::GovernanceState::default();

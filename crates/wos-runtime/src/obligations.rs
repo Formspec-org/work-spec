@@ -1191,6 +1191,17 @@ mod tests {
         load_obligation_policies(Some(&json))
     }
 
+    /// Test wrapper: run activations with the default monitor config so the
+    /// existing call sites stay terse and the cap (WOS-PERF-2802) is exercised
+    /// only by the tests that pass an explicit config.
+    fn activate(
+        policies: &[ObligationPolicy],
+        instance: &mut WorkflowProcess,
+        ev: &ObligationEvent<'_>,
+    ) -> Vec<ProvenanceRecord> {
+        evaluate_activations(policies, instance, ev, ObligationMonitorConfig::default())
+    }
+
     fn income_policy_json() -> serde_json::Value {
         serde_json::json!({
             "obligationPolicies": [{
@@ -1281,7 +1292,7 @@ mod tests {
         let ed = serde_json::json!({ "field": "income" });
         let ev = event("caseFileUpdated", Some(&ed), &cs, Some("caseworker-7"), &[]);
 
-        let recs = evaluate_activations(&policies, &mut inst, &ev);
+        let recs = activate(&policies, &mut inst, &ev);
 
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].record_kind, ProvenanceKind::ObligationActivated);
@@ -1302,7 +1313,7 @@ mod tests {
         let ed = serde_json::json!({ "field": "address" });
         let ev = event("caseFileUpdated", Some(&ed), &cs, None, &[]);
 
-        let recs = evaluate_activations(&policies, &mut inst, &ev);
+        let recs = activate(&policies, &mut inst, &ev);
         assert!(recs.is_empty());
         assert!(inst.governance_state.is_none() || inst
             .governance_state
@@ -1320,8 +1331,8 @@ mod tests {
         let ed = serde_json::json!({ "field": "income" });
         let ev = event("caseFileUpdated", Some(&ed), &cs, None, &[]);
 
-        evaluate_activations(&policies, &mut inst, &ev);
-        let recs2 = evaluate_activations(&policies, &mut inst, &ev);
+        activate(&policies, &mut inst, &ev);
+        let recs2 = activate(&policies, &mut inst, &ev);
 
         assert!(recs2.is_empty(), "ignoreWhilePending must not duplicate");
         assert_eq!(
@@ -1338,7 +1349,7 @@ mod tests {
         let ed = serde_json::json!({ "field": "income" });
         // Activate, recording trigger actor "agent-1".
         let act = event("caseFileUpdated", Some(&ed), &cs, Some("agent-1"), &[]);
-        evaluate_activations(&policies, &mut inst, &act);
+        activate(&policies, &mut inst, &act);
 
         // Same actor attempts to satisfy → notSameAsTriggerActor blocks it.
         let roles = vec!["underwriter".to_string()];
@@ -1368,7 +1379,7 @@ mod tests {
         let cs = serde_json::json!({});
         let ed = serde_json::json!({ "field": "income" });
         let act = event("caseFileUpdated", Some(&ed), &cs, None, &[]);
-        evaluate_activations(&policies, &mut inst, &act);
+        activate(&policies, &mut inst, &act);
 
         // finalApprovalRequested while obligation pending → violateWhen + block.
         let approval = event("finalApprovalRequested", None, &cs, None, &[]);
@@ -1416,7 +1427,7 @@ mod tests {
         let cs = serde_json::json!({});
         // now_ms = 0 (epoch) + 2 days → 1970-01-03T00:00:00Z.
         let ev = event("started", None, &cs, None, &[]);
-        evaluate_activations(&policies, &mut inst, &ev);
+        activate(&policies, &mut inst, &ev);
         let o = &inst.governance_state.as_ref().unwrap().pending_obligations[0];
         assert_eq!(o.deadline.as_deref(), Some("1970-01-03T00:00:00Z"));
     }
@@ -1428,7 +1439,7 @@ mod tests {
         let mut inst = bare_instance();
         let cs = serde_json::json!({});
         let ev = event("started", None, &cs, None, &[]);
-        evaluate_activations(&policies, &mut inst, &ev);
+        activate(&policies, &mut inst, &ev);
         let o = &inst.governance_state.as_ref().unwrap().pending_obligations[0];
         assert!(o.deadline.is_none());
     }
@@ -1452,7 +1463,7 @@ mod tests {
         let mut inst = bare_instance();
         let cs = serde_json::json!({});
         let ev = event("started", None, &cs, None, &[]); // now_ms = 0 → deadline 2 days
-        evaluate_activations(&policies, &mut inst, &ev);
+        activate(&policies, &mut inst, &ev);
 
         // Before the deadline: no expiry.
         let early = evaluate_deadline_expiries(&policies, &mut inst, 1, "1970-01-01T00:00:00.001Z");
@@ -1489,7 +1500,7 @@ mod tests {
         let mut inst = bare_instance();
         let cs = serde_json::json!({});
         let ev = event("started", None, &cs, None, &[]);
-        evaluate_activations(&policies, &mut inst, &ev);
+        activate(&policies, &mut inst, &ev);
         // Satisfy before deadline.
         let done = event("done", None, &cs, Some("u-2"), &[]);
         evaluate_satisfactions(&policies, &mut inst, &done);
@@ -1539,8 +1550,8 @@ mod tests {
         )));
         let mut inst = bare_instance();
         let cs = serde_json::json!({});
-        evaluate_activations(&policies, &mut inst, &event("startA", None, &cs, None, &[]));
-        evaluate_activations(&policies, &mut inst, &event("startB", None, &cs, None, &[]));
+        activate(&policies, &mut inst, &event("startA", None, &cs, None, &[]));
+        activate(&policies, &mut inst, &event("startB", None, &cs, None, &[]));
 
         let outcome =
             evaluate_pre_event_gate(&policies, &mut inst, &event("trigger", None, &cs, None, &[]));
@@ -1558,8 +1569,8 @@ mod tests {
         )));
         let mut inst = bare_instance();
         let cs = serde_json::json!({});
-        evaluate_activations(&policies, &mut inst, &event("startA", None, &cs, None, &[]));
-        evaluate_activations(&policies, &mut inst, &event("startB", None, &cs, None, &[]));
+        activate(&policies, &mut inst, &event("startA", None, &cs, None, &[]));
+        activate(&policies, &mut inst, &event("startB", None, &cs, None, &[]));
 
         let outcome =
             evaluate_pre_event_gate(&policies, &mut inst, &event("trigger", None, &cs, None, &[]));
@@ -1581,7 +1592,7 @@ mod tests {
         })));
         let mut inst = bare_instance();
         let cs = serde_json::json!({});
-        evaluate_activations(&policies, &mut inst, &event("started", None, &cs, None, &[]));
+        activate(&policies, &mut inst, &event("started", None, &cs, None, &[]));
         let outcome =
             evaluate_pre_event_gate(&policies, &mut inst, &event("trigger", None, &cs, None, &[]));
         assert!(!outcome.block);
@@ -1612,8 +1623,8 @@ mod tests {
         let mut ev = event("started", None, &cs, None, &[]);
         ev.idempotency_token = Some("tok-1");
 
-        let first = evaluate_activations(&policies, &mut inst, &ev);
-        let second = evaluate_activations(&policies, &mut inst, &ev);
+        let first = activate(&policies, &mut inst, &ev);
+        let second = activate(&policies, &mut inst, &ev);
 
         assert_eq!(first.len(), 1, "first drain activates once");
         assert!(second.is_empty(), "replay must not re-activate");
@@ -1640,7 +1651,7 @@ mod tests {
         })));
         let mut inst = bare_instance();
         let cs = serde_json::json!({});
-        evaluate_activations(&policies, &mut inst, &event("started", None, &cs, None, &[]));
+        activate(&policies, &mut inst, &event("started", None, &cs, None, &[]));
 
         // Before the 1-day-before window: no warning.
         let day = 24 * 60 * 60 * 1000;
@@ -1669,7 +1680,7 @@ mod tests {
         // trigger actor on the PendingObligation.
         let mut act = event("caseFileUpdated", Some(&ed), &cs, Some("agent-7"), &[]);
         act.actor_type = Some(ActorKind::Agent);
-        evaluate_activations(&policies, &mut inst, &act);
+        activate(&policies, &mut inst, &act);
         assert_eq!(
             inst.governance_state.as_ref().unwrap().pending_obligations[0]
                 .trigger_actor_id
@@ -1703,7 +1714,7 @@ mod tests {
         let mut inst = bare_instance();
         let cs = serde_json::json!({});
         let ed = serde_json::json!({ "field": "income" });
-        evaluate_activations(
+        activate(
             &policies,
             &mut inst,
             &event("caseFileUpdated", Some(&ed), &cs, Some("caseworker-1"), &[]),
@@ -1739,7 +1750,7 @@ mod tests {
         let mut inst = bare_instance();
         let cs = serde_json::json!({});
         let ed = serde_json::json!({ "field": "income" });
-        evaluate_activations(
+        activate(
             &policies,
             &mut inst,
             &event("caseFileUpdated", Some(&ed), &cs, Some("caseworker-1"), &[]),
@@ -1779,7 +1790,7 @@ mod tests {
         })));
         let mut inst = bare_instance();
         let cs = serde_json::json!({ "income": 60000, "ssn": "secret" });
-        evaluate_activations(&policies, &mut inst, &event("started", None, &cs, None, &[]));
+        activate(&policies, &mut inst, &event("started", None, &cs, None, &[]));
 
         let ed = serde_json::json!({ "field": "income", "note": "do-not-leak" });
         let outcome = evaluate_pre_event_gate(
@@ -1797,5 +1808,350 @@ mod tests {
         );
         assert!(data["caseStateWitness"].get("caseFile.ssn").is_none());
         assert_eq!(data["responsibleRole"], serde_json::json!("underwriter"));
+    }
+
+    // ── WOS-PERF-2802: pending-obligation safety cap ─────────────────────────
+
+    #[test]
+    fn cap_refuses_new_pending_and_emits_warning() {
+        // `createEachTime` so each matching event would otherwise add a row.
+        let policies = load_obligation_policies(Some(&serde_json::json!({
+            "obligationPolicies": [{
+                "id": "p-each",
+                "activateWhen": { "on": { "event": "started" } },
+                "satisfyWhen": { "on": { "event": "done" } },
+                "duplicatePolicy": "createEachTime",
+                "onViolation": "block"
+            }]
+        })));
+        let mut inst = bare_instance();
+        let cs = serde_json::json!({});
+        let cfg = ObligationMonitorConfig { max_pending: 2 };
+
+        // Fill the cap: two activations create two pending obligations.
+        for _ in 0..2 {
+            evaluate_activations(
+                &policies,
+                &mut inst,
+                &event("started", None, &cs, None, &[]),
+                cfg,
+            );
+        }
+        assert_eq!(
+            inst.governance_state.as_ref().unwrap().pending_obligations.len(),
+            2
+        );
+
+        // The next activation is refused: no new pending row, one warning record.
+        let recs = evaluate_activations(
+            &policies,
+            &mut inst,
+            &event("started", None, &cs, None, &[]),
+            cfg,
+        );
+        assert_eq!(
+            inst.governance_state.as_ref().unwrap().pending_obligations.len(),
+            2,
+            "cap must refuse a third pending obligation"
+        );
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].record_kind, ProvenanceKind::ObligationWarning);
+        assert_eq!(
+            recs[0].data.as_ref().unwrap()["beforeBreach"],
+            serde_json::json!("maxPendingObligationsExceeded"),
+            "the cap warning is deterministic and auditable"
+        );
+    }
+
+    #[test]
+    fn default_config_does_not_cap_realistic_workloads() {
+        assert_eq!(
+            ObligationMonitorConfig::default().max_pending,
+            DEFAULT_MAX_PENDING_OBLIGATIONS
+        );
+    }
+
+    // ── WOS-PERF-2803: deterministic ordering across a multi-policy drain ────
+
+    #[test]
+    fn activations_follow_document_order_deterministically() {
+        // Three policies that all activate on the same event; the activation
+        // provenance and the pending push order MUST follow document order.
+        let policies = load_obligation_policies(Some(&serde_json::json!({
+            "obligationPolicies": [
+                {
+                    "id": "policy-a",
+                    "activateWhen": { "on": { "event": "started" } },
+                    "satisfyWhen": { "on": { "event": "doneA" } },
+                    "onViolation": "block"
+                },
+                {
+                    "id": "policy-b",
+                    "activateWhen": { "on": { "event": "started" } },
+                    "satisfyWhen": { "on": { "event": "doneB" } },
+                    "onViolation": "block"
+                },
+                {
+                    "id": "policy-c",
+                    "activateWhen": { "on": { "event": "started" } },
+                    "satisfyWhen": { "on": { "event": "doneC" } },
+                    "onViolation": "block"
+                }
+            ]
+        })));
+        let cs = serde_json::json!({});
+
+        // Drain twice from a fresh instance; both runs MUST agree exactly.
+        let order = |inst: &WorkflowProcess| -> Vec<String> {
+            inst.governance_state
+                .as_ref()
+                .unwrap()
+                .pending_obligations
+                .iter()
+                .map(|o| o.policy_id.clone())
+                .collect()
+        };
+        let mut a = bare_instance();
+        let recs_a = activate(&policies, &mut a, &event("started", None, &cs, None, &[]));
+        let mut b = bare_instance();
+        let recs_b = activate(&policies, &mut b, &event("started", None, &cs, None, &[]));
+
+        let policy_order: Vec<String> = recs_a
+            .iter()
+            .map(|r| r.data.as_ref().unwrap()["policyId"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(policy_order, vec!["policy-a", "policy-b", "policy-c"]);
+        assert_eq!(order(&a), vec!["policy-a", "policy-b", "policy-c"]);
+        // Stable across independent drains (no map/iteration nondeterminism).
+        assert_eq!(order(&a), order(&b));
+        assert_eq!(recs_a.len(), recs_b.len());
+    }
+
+    // ── WOS-MIG-2604: unsupported-feature fail-closed posture ────────────────
+
+    #[test]
+    fn support_posture_fails_closed_for_rights_and_safety() {
+        assert_eq!(
+            obligation_support_posture(ImpactLevel::RightsImpacting, false),
+            ObligationSupportPosture::FailClosed
+        );
+        assert_eq!(
+            obligation_support_posture(ImpactLevel::SafetyImpacting, false),
+            ObligationSupportPosture::FailClosed
+        );
+        assert_eq!(
+            obligation_support_posture(ImpactLevel::Operational, false),
+            ObligationSupportPosture::WarnOnly
+        );
+        assert_eq!(
+            obligation_support_posture(ImpactLevel::Informational, false),
+            ObligationSupportPosture::WarnOnly
+        );
+        // Supported always yields Supported regardless of impact.
+        assert_eq!(
+            obligation_support_posture(ImpactLevel::RightsImpacting, true),
+            ObligationSupportPosture::Supported
+        );
+    }
+
+    #[test]
+    fn support_gate_blocks_rights_and_warns_operational() {
+        let policies = policies_from(income_policy_json());
+
+        // Rights-impacting + unsupported → block + a violation per policy.
+        let gate =
+            evaluate_obligation_support_gate(&policies, ImpactLevel::RightsImpacting, false);
+        assert!(gate.block, "rights-impacting must fail closed");
+        assert_eq!(gate.provenance.len(), 1);
+        assert_eq!(
+            gate.provenance[0].record_kind,
+            ProvenanceKind::ObligationViolated
+        );
+
+        // Operational + unsupported → warn, no block.
+        let gate = evaluate_obligation_support_gate(&policies, ImpactLevel::Operational, false);
+        assert!(!gate.block, "operational may proceed with a warning");
+        assert_eq!(gate.provenance.len(), 1);
+        assert_eq!(
+            gate.provenance[0].record_kind,
+            ProvenanceKind::ObligationWarning
+        );
+
+        // Supported → empty gate regardless of impact.
+        let gate =
+            evaluate_obligation_support_gate(&policies, ImpactLevel::RightsImpacting, true);
+        assert!(!gate.block);
+        assert!(gate.provenance.is_empty());
+
+        // No policies → empty gate even when unsupported + rights-impacting.
+        let gate = evaluate_obligation_support_gate(&[], ImpactLevel::RightsImpacting, false);
+        assert!(!gate.block);
+        assert!(gate.provenance.is_empty());
+    }
+
+    // ── WOS-SEC-2701 / WOS-OBL-TIME-1008: authorized bypass + extension ──────
+
+    #[test]
+    fn default_authorizer_denies_agents_and_unprivileged_humans() {
+        let auth = DefaultObligationAuthorizer;
+        let admin = vec![OBLIGATION_ADMIN_ROLE.to_string()];
+        let staff = vec!["caseworker".to_string()];
+
+        // Agent is always denied, even with the admin role.
+        assert!(!auth.authorize("o", Some("a"), Some(ActorKind::Agent), &admin));
+        // Human without the admin role is denied.
+        assert!(!auth.authorize("o", Some("h"), Some(ActorKind::Human), &staff));
+        // Human with the admin role is allowed.
+        assert!(auth.authorize("o", Some("h"), Some(ActorKind::Human), &admin));
+    }
+
+    fn pending_for_extension() -> (Vec<ObligationPolicy>, WorkflowProcess, String) {
+        let policies = policy_with_deadline("P2D");
+        let mut inst = bare_instance();
+        let cs = serde_json::json!({});
+        activate(&policies, &mut inst, &event("started", None, &cs, None, &[]));
+        let oid = inst.governance_state.as_ref().unwrap().pending_obligations[0]
+            .obligation_id
+            .clone();
+        (policies, inst, oid)
+    }
+
+    #[test]
+    fn authorized_human_extends_deadline_and_witnesses_old_new() {
+        let (_p, mut inst, oid) = pending_for_extension();
+        let old = inst.governance_state.as_ref().unwrap().pending_obligations[0]
+            .deadline
+            .clone();
+        let roles = vec![OBLIGATION_ADMIN_ROLE.to_string()];
+        let outcome = extend_obligation_deadline(
+            &mut inst,
+            &oid,
+            "1970-01-05T00:00:00Z",
+            Some("supervisor-1"),
+            Some(ActorKind::Human),
+            &roles,
+            &DefaultObligationAuthorizer,
+        );
+        let records = match outcome {
+            ExtensionOutcome::Extended(r) => r,
+            other => panic!("expected Extended, got {other:?}"),
+        };
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].record_kind, ProvenanceKind::ObligationWarning);
+        let data = records[0].data.as_ref().unwrap();
+        assert_eq!(data["beforeBreach"], serde_json::json!("deadlineExtended"));
+        assert_eq!(data["newDeadline"], serde_json::json!("1970-01-05T00:00:00Z"));
+        assert_eq!(data["previousDeadline"], serde_json::json!(old.unwrap()));
+        assert_eq!(data["extendedBy"], serde_json::json!("supervisor-1"));
+        // Deadline updated in place.
+        assert_eq!(
+            inst.governance_state.as_ref().unwrap().pending_obligations[0]
+                .deadline
+                .as_deref(),
+            Some("1970-01-05T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn unauthorized_extension_is_refused_and_leaves_deadline() {
+        let (_p, mut inst, oid) = pending_for_extension();
+        let original = inst.governance_state.as_ref().unwrap().pending_obligations[0]
+            .deadline
+            .clone();
+        // Agent (always denied) attempts the extension.
+        let outcome = extend_obligation_deadline(
+            &mut inst,
+            &oid,
+            "1970-01-09T00:00:00Z",
+            Some("agent-3"),
+            Some(ActorKind::Agent),
+            &[OBLIGATION_ADMIN_ROLE.to_string()],
+            &DefaultObligationAuthorizer,
+        );
+        let records = match outcome {
+            ExtensionOutcome::Refused(r) => r,
+            other => panic!("expected Refused, got {other:?}"),
+        };
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].record_kind, ProvenanceKind::ObligationViolated);
+        // Deadline unchanged.
+        assert_eq!(
+            inst.governance_state.as_ref().unwrap().pending_obligations[0].deadline,
+            original
+        );
+    }
+
+    // ── WOS-SEC-2702: a drained event never mutates an ObligationPolicy ──────
+
+    #[test]
+    fn evaluation_does_not_mutate_policies() {
+        // The whole monitor takes `&[ObligationPolicy]` — policies are read-only
+        // inputs and pending state is the only mutation. This test pins that:
+        // a full drain pass (activate → satisfy → cancel → gate) leaves the
+        // policy slice byte-identical.
+        let policies = policies_from(income_policy_json());
+        let before = serde_json::to_value(&policies).unwrap();
+        let mut inst = bare_instance();
+        let cs = serde_json::json!({});
+        let ed = serde_json::json!({ "field": "income" });
+
+        activate(&policies, &mut inst, &event("caseFileUpdated", Some(&ed), &cs, Some("cw-1"), &[]));
+        let approval = event("finalApprovalRequested", None, &cs, None, &[]);
+        evaluate_pre_event_gate(&policies, &mut inst, &approval);
+        let roles = vec!["underwriter".to_string()];
+        let sat = event("underwritingReviewCompleted", None, &cs, Some("u-2"), &roles);
+        evaluate_satisfactions(&policies, &mut inst, &sat);
+        evaluate_cancellations(&policies, &mut inst, &sat);
+
+        let after = serde_json::to_value(&policies).unwrap();
+        assert_eq!(before, after, "policies must be read-only across a drain");
+    }
+
+    // ── WOS-PERF-2804 / WOS-MIG-2601: crash-recovery round-trip durability ───
+
+    #[test]
+    fn pending_obligation_survives_serialize_reload_then_satisfies() {
+        let policies = policies_from(income_policy_json());
+        let mut inst = bare_instance();
+        let cs = serde_json::json!({});
+        let ed = serde_json::json!({ "field": "income" });
+        let mut act = event("caseFileUpdated", Some(&ed), &cs, Some("cw-1"), &[]);
+        act.idempotency_token = Some("tok-recovery");
+        activate(&policies, &mut inst, &act);
+        assert_eq!(
+            inst.governance_state.as_ref().unwrap().pending_obligations.len(),
+            1
+        );
+
+        // Crash + reload: serialize the whole process and deserialize it back.
+        let serialized = serde_json::to_value(&inst).unwrap();
+        let mut reloaded: WorkflowProcess = serde_json::from_value(serialized).unwrap();
+
+        // The pending obligation and dedupe key survived the round-trip.
+        let g = reloaded.governance_state.as_ref().unwrap();
+        assert_eq!(g.pending_obligations.len(), 1);
+        assert_eq!(g.pending_obligations[0].status, ObligationStatus::Pending);
+        assert!(g
+            .seen_obligation_activation_keys
+            .iter()
+            .any(|k| k.contains("tok-recovery")));
+
+        // Replay the same activation after reload → deduped, no second pending.
+        activate(&policies, &mut reloaded, &act);
+        assert_eq!(
+            reloaded.governance_state.as_ref().unwrap().pending_obligations.len(),
+            1,
+            "dedupe key must survive reload (WOS-PERF-2804)"
+        );
+
+        // Satisfy after reload → discharges normally.
+        let roles = vec!["underwriter".to_string()];
+        let done = event("underwritingReviewCompleted", None, &cs, Some("u-2"), &roles);
+        let recs = evaluate_satisfactions(&policies, &mut reloaded, &done);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(
+            reloaded.governance_state.as_ref().unwrap().pending_obligations[0].status,
+            ObligationStatus::Satisfied
+        );
     }
 }
