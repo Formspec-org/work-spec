@@ -32,6 +32,24 @@
       "$ref": "#/$defs/WorkflowProcessGovernance"
     },
     {
+      "$ref": "#/$defs/PendingObligation"
+    },
+    {
+      "$ref": "#/$defs/ObligationStatusQuery"
+    },
+    {
+      "$ref": "#/$defs/ObligationStatusList"
+    },
+    {
+      "$ref": "#/$defs/ObligationStatusItem"
+    },
+    {
+      "$ref": "#/$defs/ObligationBypassCommand"
+    },
+    {
+      "$ref": "#/$defs/ObligationDeadlineExtensionCommand"
+    },
+    {
       "$ref": "#/$defs/WorkflowProcessTimerList"
     },
     {
@@ -933,6 +951,371 @@
                 "description": "RFC 3339 timestamp recording when this governance rule became active."
               }
             }
+          }
+        },
+        "pendingObligations": {
+          "type": "array",
+          "description": "Durable obligations currently outstanding on this instance (ADR 0096 D-2/D-5). Projects the runtime `WorkflowProcess.governanceState.pendingObligations[]` state (Rust `wos_core::instance::GovernanceState.pending_obligations`). Backward compatible: optional and default-absent on instances that declare no obligation policies. Ordered by `activatedAt` ascending.",
+          "items": {
+            "$ref": "#/$defs/PendingObligation"
+          }
+        }
+      }
+    },
+    "PendingObligation": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A single durable obligation tracked at runtime on a workflow process (ADR 0096 D-2/D-5). Created when its `ObligationPolicy.activateWhen` matches and discharged, cancelled, violated, expired, or bypassed thereafter. Mirrors the kernel runtime `PendingObligation` state (Rust `wos_core::instance::PendingObligation`); the author-time policy lives at `wos-workflow.schema.json#/$defs/ObligationPolicy`. This projection is read-only — bypass and deadline-extension are commands, not field edits.",
+      "required": [
+        "obligationId",
+        "policyId",
+        "status",
+        "activatedAt"
+      ],
+      "properties": {
+        "obligationId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable runtime identifier of this pending-obligation instance, unique within the process. Distinct from `policyId`: one policy can spawn many obligations over an instance's life.",
+          "examples": [
+            "obl_01jqrxabcd3f8xtx9qxkkv3raa"
+          ],
+          "x-wos": {
+            "openStringKind": "identifier"
+          }
+        },
+        "policyId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Identifier of the `ObligationPolicy` that spawned this obligation (`wos-workflow.schema.json#/$defs/ObligationPolicy.id`). Correlates the runtime obligation back to its author-time duty.",
+          "examples": [
+            "income-change-review-required"
+          ],
+          "x-wos": {
+            "openStringKind": "identifier"
+          }
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "satisfied",
+            "violated",
+            "cancelled",
+            "expired",
+            "bypassed"
+          ],
+          "description": "Closed lifecycle status of this obligation. `pending` is outstanding; `satisfied` discharged by `satisfyWhen`; `violated` by `violateWhen` or violation action on deadline; `cancelled` by `cancelWhen`; `expired` when the deadline elapsed; `bypassed` when an authorized actor issued an `ObligationBypassCommand`. Closed-no-extension — the obligation state machine is fixed (ADR 0096 D-5)."
+        },
+        "triggerEvent": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Kernel event name whose arrival matched `activateWhen` and created this obligation. Omitted when the obligation was activated by a non-event criterion.",
+          "examples": [
+            "income.reported"
+          ],
+          "x-wos": {
+            "openStringKind": "identifier"
+          }
+        },
+        "triggerActorId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Identifier of the actor whose action triggered activation. Load-bearing for separation-of-duties: `satisfyWhen` MAY honor `actor.notSameAsTriggerActor`, so the satisfying actor is checked against this value. Omitted when activation had no attributable actor.",
+          "examples": [
+            "applicant-7"
+          ],
+          "x-wos": {
+            "openStringKind": "identifier"
+          }
+        },
+        "activatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "RFC 3339 UTC timestamp when this obligation became pending. The deadline (when present) is computed from this instant plus the policy `within`."
+        },
+        "deadline": {
+          "type": "string",
+          "format": "date-time",
+          "description": "RFC 3339 UTC timestamp by which the obligation MUST be satisfied. Computed by the runtime from `activatedAt + ObligationDeadline.within` (business-day-resolved against `calendarRef`). Omitted when the policy declares no deadline."
+        },
+        "responsibleActor": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Actor accountable for satisfying this obligation, projected from `ObligationPolicy.responsibleActor`. Omitted when the policy names only a role or neither.",
+          "examples": [
+            "underwriter-1"
+          ],
+          "x-wos": {
+            "openStringKind": "identifier"
+          }
+        },
+        "responsibleRole": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Role accountable for satisfying this obligation, projected from `ObligationPolicy.responsibleRole`. Omitted when the policy names only an actor or neither.",
+          "examples": [
+            "underwriter"
+          ],
+          "x-wos": {
+            "openStringKind": "identifier"
+          }
+        },
+        "correlationKey": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional cross-event correlation key binding this obligation to a related set of events or cases (Kernel S9.4). Omitted when the obligation is not correlation-scoped.",
+          "x-wos": {
+            "openStringKind": "opaque-token"
+          }
+        },
+        "extensions": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Vendor-extension bag for runtime obligation state. Keys MUST use the `x-` prefix per Kernel S10.6; the kernel `extensions` seam is the only open-composition surface on this projection.",
+          "patternProperties": {
+            "^x-[a-z][a-z0-9-]*$": {
+              "$comment": "Vendor extension value; opaque to the WOS API contract."
+            }
+          }
+        }
+      }
+    },
+    "ObligationStatusQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Reserved query-parameter set for the obligation-status projection of a workflow process (WOS-API-2202, ADR 0096). Filters the pending-obligation set by status, responsible actor, and deadline window. Filters compose with AND semantics; a missing filter spans every value for that dimension.",
+      "properties": {
+        "status": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Filter to obligations whose `status` is in this set. Repeated query parameter or comma-separated form. Empty array is rejected with `WOS-1422`; omit the field to span every status.",
+          "items": {
+            "enum": [
+              "pending",
+              "satisfied",
+              "violated",
+              "cancelled",
+              "expired",
+              "bypassed"
+            ],
+            "description": "Closed obligation status literal, matching `PendingObligation.status`."
+          }
+        },
+        "responsibleActor": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Filter to obligations whose `responsibleActor` equals this identifier.",
+          "examples": [
+            "underwriter-1"
+          ],
+          "x-wos": {
+            "openStringKind": "identifier"
+          }
+        },
+        "responsibleRole": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Filter to obligations whose `responsibleRole` equals this identifier.",
+          "examples": [
+            "underwriter"
+          ],
+          "x-wos": {
+            "openStringKind": "identifier"
+          }
+        },
+        "deadlineBefore": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Exclusive UTC RFC 3339 upper bound on `deadline`. Narrows to obligations whose deadline falls before this instant — the at-risk set. Obligations without a deadline are excluded when this filter is present."
+        },
+        "deadlineAfter": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Inclusive UTC RFC 3339 lower bound on `deadline`. Obligations without a deadline are excluded when this filter is present."
+        }
+      }
+    },
+    "ObligationStatusList": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Obligation-status projection response for a workflow process (WOS-API-2202, ADR 0096). Lists the obligations matching an `ObligationStatusQuery`, each enriched with the policy reference, deadline, status, and a human-readable explanation. Not cursor-paginated: the pending-obligation set per instance is small and bounded.",
+      "required": [
+        "processId",
+        "items"
+      ],
+      "properties": {
+        "processId": {
+          "$ref": "#/$defs/WosResourceUrn",
+          "description": "Workflow process these obligations belong to."
+        },
+        "items": {
+          "type": "array",
+          "description": "Matching obligations, ordered by `deadline` ascending (deadline-less obligations sorted last by `activatedAt`).",
+          "items": {
+            "$ref": "#/$defs/ObligationStatusItem"
+          }
+        }
+      }
+    },
+    "ObligationStatusItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A single entry in an `ObligationStatusList` (WOS-API-2202, ADR 0096). Carries the `PendingObligation` projection plus a derived `explanation` describing why the obligation is in its current status — surfaced to operators reasoning about at-risk or violated duties.",
+      "required": [
+        "obligation",
+        "policyId",
+        "status"
+      ],
+      "properties": {
+        "obligation": {
+          "$ref": "#/$defs/PendingObligation",
+          "description": "Full pending-obligation projection."
+        },
+        "policyId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Identifier of the originating `ObligationPolicy`. Duplicated from `obligation.policyId` so list consumers can group by policy without descending into the nested object.",
+          "examples": [
+            "income-change-review-required"
+          ],
+          "x-wos": {
+            "openStringKind": "identifier"
+          }
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "satisfied",
+            "violated",
+            "cancelled",
+            "expired",
+            "bypassed"
+          ],
+          "description": "Closed obligation status, duplicated from `obligation.status` for ergonomic filtering and grouping at the list level."
+        },
+        "deadline": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Duplicated from `obligation.deadline`. Omitted when the obligation has no deadline."
+        },
+        "explanation": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable explanation of why the obligation holds its current status — the policy duty statement, the breach/satisfaction cause, or the bypass rationale. Surfaced verbatim to operators; not machine-parsed.",
+          "examples": [
+            "Independent underwriting review required before final approval because reported income changed after submission."
+          ],
+          "x-wos": {
+            "openStringKind": "prose"
+          }
+        }
+      }
+    },
+    "ObligationBypassCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Command body that bypasses a pending durable obligation (WOS-API-2203, ADR 0096). An authorized actor records that the obligation is intentionally not satisfied; the runtime sets `PendingObligation.status` to `bypassed` and emits a Facts-tier provenance record carrying the actor and rationale. Carries a REQUIRED `actorRef` per ADR 0082 D-9 and a REQUIRED `rationale` so the bypass is never silent.",
+      "required": [
+        "obligationId",
+        "actorRef",
+        "rationale"
+      ],
+      "properties": {
+        "obligationId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Runtime identifier of the pending obligation to bypass (`PendingObligation.obligationId`). The obligation MUST be in `pending` status; bypassing a terminal obligation is rejected with `WOS-1409`.",
+          "examples": [
+            "obl_01jqrxabcd3f8xtx9qxkkv3raa"
+          ],
+          "x-wos": {
+            "openStringKind": "identifier"
+          }
+        },
+        "actorRef": {
+          "$ref": "#/$defs/ActorRef",
+          "description": "Actor URN authorizing the bypass (ADR 0082 D-9). REQUIRED -- every governance mutation carries a recorded actor; authority to bypass is checked server-side."
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Operator-supplied prose justification for bypassing the obligation. Length-bounded to keep the wire envelope predictable; surfaced verbatim on the bypass Facts-tier provenance record.",
+          "x-wos": {
+            "openStringKind": "prose"
+          }
+        }
+      }
+    },
+    "ObligationDeadlineExtensionCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Command body that extends the deadline of a pending durable obligation (WOS-API-2203, ADR 0096). An authorized actor pushes the obligation's deadline out, either to an absolute new instant (`newDeadline`) or by a relative duration from now (`newWithin`); exactly one MUST be supplied. The runtime reschedules the deadline timer and emits a Facts-tier provenance record carrying the actor and rationale. Carries a REQUIRED `actorRef` per ADR 0082 D-9.",
+      "required": [
+        "obligationId",
+        "actorRef",
+        "rationale"
+      ],
+      "oneOf": [
+        {
+          "required": [
+            "newDeadline"
+          ],
+          "not": {
+            "required": [
+              "newWithin"
+            ]
+          }
+        },
+        {
+          "required": [
+            "newWithin"
+          ],
+          "not": {
+            "required": [
+              "newDeadline"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "obligationId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Runtime identifier of the pending obligation to extend (`PendingObligation.obligationId`). The obligation MUST be in `pending` status; extending a terminal obligation is rejected with `WOS-1409`.",
+          "examples": [
+            "obl_01jqrxabcd3f8xtx9qxkkv3raa"
+          ],
+          "x-wos": {
+            "openStringKind": "identifier"
+          }
+        },
+        "newDeadline": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Absolute UTC RFC 3339 timestamp for the new deadline. Mutually exclusive with `newWithin` (exactly one is supplied). MUST be later than the current deadline; an earlier instant is rejected with `WOS-1422`."
+        },
+        "newWithin": {
+          "type": "string",
+          "pattern": "^P(?:\\d+BD|(?!$)(?:\\d+Y)?(?:\\d+M)?(?:\\d+W)?(?:\\d+D)?(?:T(?=\\d)(?:\\d+H)?(?:\\d+M)?(?:\\d+S)?)?)$",
+          "description": "Relative new deadline as an ISO 8601 duration measured from the time the command is applied; `P<N>BD` denotes N business days resolved against the policy `calendarRef`. Mutually exclusive with `newDeadline`. Mirrors the `within` grammar at `wos-workflow.schema.json#/$defs/ObligationDeadline.within`.",
+          "examples": [
+            "P2D",
+            "PT4H",
+            "P5BD"
+          ]
+        },
+        "actorRef": {
+          "$ref": "#/$defs/ActorRef",
+          "description": "Actor URN authorizing the extension (ADR 0082 D-9). REQUIRED -- every governance mutation carries a recorded actor; authority to extend is checked server-side."
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Operator-supplied prose justification for extending the deadline. Length-bounded to keep the wire envelope predictable; surfaced verbatim on the extension Facts-tier provenance record.",
+          "x-wos": {
+            "openStringKind": "prose"
           }
         }
       }

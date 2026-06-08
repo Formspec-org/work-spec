@@ -12,7 +12,7 @@ use wos_core::eval::Evaluator;
 use wos_core::model::kernel::KernelDocument;
 use wos_core::{ActorKind, ProvenanceKind, ProvenanceRecord};
 
-use crate::milestones::evaluate_milestones;
+use crate::milestones::{MilestoneEventContext, evaluate_milestones_with_event};
 use crate::obligations::{
     ObligationEvent, ObligationTaskRequest, ViolationEffects, evaluate_activations,
     evaluate_cancellations, evaluate_deadline_expiries, evaluate_deadline_warnings,
@@ -239,6 +239,10 @@ impl WosRuntime {
                     now_ms,
                     now_iso: &now_iso,
                     idempotency_token: ev_token.as_deref(),
+                    // No related-case event plumbing in the reference drain yet
+                    // (WOS-INTEG-REL-2101 follow-up): every drained event is an
+                    // own-case event.
+                    is_related_event: false,
                 };
                 let pass =
                     evaluate_pre_event_gate(&obligation_policies, &mut record.process, &obl_event);
@@ -360,7 +364,26 @@ impl WosRuntime {
         // Records are appended in lexicographic milestone-id order so the provenance
         // stream is deterministic.
         let post_state = record.process.case_state.clone();
-        let milestone_records = evaluate_milestones(&kernel, &mut record.process, &post_state);
+        // WOS-INTEG-MILE-1301: surface the draining event so a milestone's
+        // optional `activationCriteria` can fire on event/actor triggers in
+        // addition to the FEL `condition`. The WOS id-as-role convention passes
+        // the actor id as its single role (mirrors the obligation gate).
+        let milestone_actor = event.actor_id.clone();
+        let milestone_actor_roles: Vec<String> = milestone_actor.iter().cloned().collect();
+        let milestone_ctx = MilestoneEventContext {
+            event_name: &event.event,
+            event_data: event.data.as_ref(),
+            actor_id: milestone_actor.as_deref(),
+            actor_roles: &milestone_actor_roles,
+            actor_type: resolve_actor_kind(&kernel, milestone_actor.as_deref()),
+            now_ms,
+        };
+        let milestone_records = evaluate_milestones_with_event(
+            &kernel,
+            &mut record.process,
+            &post_state,
+            Some(&milestone_ctx),
+        );
         appended_provenance.extend(milestone_records);
 
         // Post-event obligation lifecycle (ADR 0096 §16.2.3 step 6): evaluate
@@ -384,6 +407,10 @@ impl WosRuntime {
                 now_ms,
                 now_iso: &now_iso,
                 idempotency_token: ev_token.as_deref(),
+                // No related-case event plumbing in the reference drain yet
+                // (WOS-INTEG-REL-2101 follow-up): every drained event is an
+                // own-case event.
+                is_related_event: false,
             };
             appended_provenance.extend(evaluate_satisfactions(
                 &obligation_policies,

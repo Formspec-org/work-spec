@@ -56,6 +56,11 @@ pub struct ObligationEvent<'a> {
     /// dedupe activation on replay (WOS-OBL-RUNTIME-0916); `None` disables the
     /// token-based guard (the per-policy `duplicatePolicy` still applies).
     pub idempotency_token: Option<&'a str>,
+    /// Whether this event was surfaced from a related case (WOS-INTEG-REL-2101).
+    /// Threaded into the [`ActivationContext`] so a policy criteria scoped to
+    /// `related` matches only related-case events. The reference drain has no
+    /// related-case event source yet, so it always passes `false` (own case).
+    pub is_related_event: bool,
 }
 
 impl<'a> ObligationEvent<'a> {
@@ -82,6 +87,7 @@ impl<'a> ObligationEvent<'a> {
             transition_tags: self.transition_tags,
             now_ms: self.now_ms,
             trigger_actor_id,
+            is_related_event: self.is_related_event,
         }
     }
 }
@@ -855,6 +861,7 @@ mod tests {
             now_ms: 0,
             now_iso: "2026-06-08T12:00:00Z",
             idempotency_token: None,
+            is_related_event: false,
         }
     }
 

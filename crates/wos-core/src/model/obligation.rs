@@ -56,6 +56,68 @@ pub struct ObligationPolicy {
     pub correlation_key: Option<String>,
     /// Action applied on violation.
     pub on_violation: ObligationViolationAction,
+    /// How a *correlated policy-engine obligation directive* is handled
+    /// (`$defs/PolicyObligationHandling`; WOS-INTEG-POLICY-1801/1802). Absent
+    /// means [`PolicyObligationHandling::RecordOnly`] — the conservative default
+    /// that records the directive in provenance without materializing a
+    /// [`PendingObligation`]. Never coerces an `indeterminate` decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obligation_handling: Option<PolicyObligationHandling>,
+}
+
+/// Bridge policy for turning a runtime policy-engine obligation *directive* into
+/// a WOS durable [`PendingObligation`] (`$defs/PolicyObligationHandling`;
+/// WOS-INTEG-POLICY-1801/1802).
+///
+/// Mirrors the schema `oneOf`: the string `"recordOnly"` or an object
+/// `{ "mode": "materialize", "templateRef": <uri> }`. The untagged
+/// representation distinguishes the JSON string from the object form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, rename_all = "camelCase")]
+pub enum PolicyObligationHandling {
+    /// `"recordOnly"`: record the directive in provenance without creating a
+    /// pending obligation. The conservative default.
+    RecordOnly(RecordOnlyTag),
+    /// `{ "mode": "materialize", "templateRef": <uri> }`: materialize the
+    /// directive into a pending obligation from the named template.
+    #[serde(rename_all = "camelCase")]
+    Materialize {
+        /// Fixed discriminant `"materialize"`.
+        mode: MaterializeTag,
+        /// URI of the obligation template the directive materializes into.
+        template_ref: String,
+    },
+}
+
+/// The literal `"recordOnly"` string discriminant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecordOnlyTag {
+    /// Serializes to / from the bare string `"recordOnly"`.
+    #[serde(rename = "recordOnly")]
+    RecordOnly,
+}
+
+/// The literal `"materialize"` string discriminant for the object form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MaterializeTag {
+    /// Serializes to / from the bare string `"materialize"`.
+    #[serde(rename = "materialize")]
+    Materialize,
+}
+
+impl PolicyObligationHandling {
+    /// Whether this handling materializes a pending obligation (vs. record-only).
+    pub fn is_materialize(&self) -> bool {
+        matches!(self, PolicyObligationHandling::Materialize { .. })
+    }
+
+    /// The obligation-template URI when this is the materialize form.
+    pub fn template_ref(&self) -> Option<&str> {
+        match self {
+            PolicyObligationHandling::Materialize { template_ref, .. } => Some(template_ref),
+            PolicyObligationHandling::RecordOnly(_) => None,
+        }
+    }
 }
 
 /// How re-activation behaves while an obligation from the same policy is pending.
@@ -346,6 +408,66 @@ mod tests {
         assert!(v.get("responsibleActor").is_none());
         let back: PendingObligation = serde_json::from_value(v).unwrap();
         assert_eq!(back, o);
+    }
+
+    #[test]
+    fn obligation_handling_record_only_string() {
+        let h: PolicyObligationHandling =
+            serde_json::from_value(serde_json::json!("recordOnly")).unwrap();
+        assert!(!h.is_materialize());
+        assert_eq!(h.template_ref(), None);
+        // round-trips to the bare string
+        assert_eq!(serde_json::to_value(&h).unwrap(), serde_json::json!("recordOnly"));
+    }
+
+    #[test]
+    fn obligation_handling_materialize_object() {
+        let h: PolicyObligationHandling = serde_json::from_value(serde_json::json!({
+            "mode": "materialize",
+            "templateRef": "urn:wos:obligation-template:policy-engine-directive"
+        }))
+        .unwrap();
+        assert!(h.is_materialize());
+        assert_eq!(
+            h.template_ref(),
+            Some("urn:wos:obligation-template:policy-engine-directive")
+        );
+        let v = serde_json::to_value(&h).unwrap();
+        assert_eq!(v["mode"], serde_json::json!("materialize"));
+        assert_eq!(
+            v["templateRef"],
+            serde_json::json!("urn:wos:obligation-template:policy-engine-directive")
+        );
+        let back: PolicyObligationHandling = serde_json::from_value(v).unwrap();
+        assert_eq!(back, h);
+    }
+
+    #[test]
+    fn policy_defaults_obligation_handling_to_none() {
+        let p: ObligationPolicy = serde_json::from_value(serde_json::json!({
+            "id": "review-required",
+            "activateWhen": { "on": { "event": "incomeChanged" } },
+            "satisfyWhen": { "on": { "event": "reviewCompleted" } },
+            "onViolation": "block"
+        }))
+        .unwrap();
+        assert!(p.obligation_handling.is_none());
+    }
+
+    #[test]
+    fn policy_parses_materialize_obligation_handling() {
+        let p: ObligationPolicy = serde_json::from_value(serde_json::json!({
+            "id": "review-required",
+            "activateWhen": { "on": { "event": "incomeChanged" } },
+            "satisfyWhen": { "on": { "event": "reviewCompleted" } },
+            "onViolation": "block",
+            "obligationHandling": {
+                "mode": "materialize",
+                "templateRef": "urn:wos:obligation-template:policy-engine-directive"
+            }
+        }))
+        .unwrap();
+        assert!(p.obligation_handling.as_ref().unwrap().is_materialize());
     }
 
     #[test]

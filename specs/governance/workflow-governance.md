@@ -981,7 +981,9 @@ warn < escalate < fail < block
 
 #### 16.2.5 Bypass
 
-A pending obligation MAY be bypassed only by an authorized actor supplying a structured rationale. Bypass is scoped to a single obligation (or a single event), not a permanent mutation of the policy. **Agents MUST NOT bypass by default** (ADR 0096; WOS-INTEG-AI-1706); an agent bypass attempt is recorded as a violation/tamper provenance record. Runtime actors MUST NOT mutate an obligation policy; policy change flows only through a workflow-definition update/migration.
+A pending obligation MAY be bypassed only by an authorized **human or admin** actor supplying a structured rationale. Bypass is scoped to a single obligation (or a single event), not a permanent mutation of the policy. **Agents MUST NOT bypass by default** (ADR 0096; WOS-INTEG-AI-1706): an agent bypass attempt MUST be rejected and recorded as a violation/tamper provenance record (`ObligationViolated` with the attempting agent's actor id), never as an `ObligationBypassed`. An agent may *request* a bypass only by routing it to an authorized human/admin actor, who supplies the rationale and is recorded as the bypassing actor. Runtime actors MUST NOT mutate an obligation policy; policy change flows only through a workflow-definition update/migration.
+
+**Same-agent independence (WOS-INTEG-AI-1705).** Where a `satisfyWhen` clause declares `actor.notSameAsTriggerActor: true`, the satisfying actor MUST differ from the recorded triggering actor (§16.2.2) — this holds for agent triggers exactly as for human triggers. An agent that activated an obligation MUST NOT satisfy that same obligation; a satisfaction attempt by the triggering agent fails the actor clause and does not discharge the duty. This is the agent-facing case of the separation-of-duties guarantee, paired with the deontic-independence prose in [AI Integration §4.7](../ai/ai-integration.md).
 
 ### 16.3 Composition
 

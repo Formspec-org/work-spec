@@ -12,13 +12,39 @@ use std::collections::HashMap;
 use fel_core::{evaluate, fel_to_json, has_error_diagnostics, parse};
 use serde_json::json;
 use wos_core::EvalContext;
+use wos_core::activation::{ActivationContext, evaluate_activation_criteria};
 use wos_core::instance::WorkflowProcess;
 use wos_core::model::kernel::KernelDocument;
-use wos_core::{ProvenanceKind, ProvenanceRecord};
+use wos_core::{ActorKind, ProvenanceKind, ProvenanceRecord};
+
+/// Post-event context surfaced to milestone evaluation for the optional
+/// `activationCriteria` path (WOS-INTEG-MILE-1301).
+///
+/// The legacy `condition` path needs only the post-event case state, so this
+/// context is optional: when `None`, milestones fire purely on `condition`. When
+/// present, a milestone declaring `activationCriteria` additionally fires when
+/// that reusable predicate matches the draining event (event/transition trigger,
+/// actor constraint, required-data presence, FEL guard).
+pub struct MilestoneEventContext<'a> {
+    /// Concrete runtime event name.
+    pub event_name: &'a str,
+    /// Event payload object, if any.
+    pub event_data: Option<&'a serde_json::Value>,
+    /// Acting actor identifier.
+    pub actor_id: Option<&'a str>,
+    /// Acting actor roles (the WOS id-as-role convention passes `[actor_id]`).
+    pub actor_roles: &'a [String],
+    /// Acting actor kind, resolved from the kernel actor registry.
+    pub actor_type: Option<ActorKind>,
+    /// Current wall-clock time in epoch milliseconds (for deadline hints).
+    pub now_ms: u64,
+}
 
 /// Evaluate all un-fired milestones against `post_state`.
 ///
-/// For each milestone whose condition now evaluates to truthy:
+/// For each milestone whose `condition` now evaluates to truthy (or, when an
+/// event context is supplied and the milestone declares `activationCriteria`,
+/// whose criteria match the draining event — WOS-INTEG-MILE-1301):
 /// - insert its id into `instance.fired_milestones`
 /// - append a `MilestoneFired` provenance record carrying `{"milestoneId": id}`
 ///
@@ -28,6 +54,23 @@ pub fn evaluate_milestones(
     kernel: &KernelDocument,
     instance: &mut WorkflowProcess,
     post_state: &serde_json::Value,
+) -> Vec<ProvenanceRecord> {
+    evaluate_milestones_with_event(kernel, instance, post_state, None)
+}
+
+/// Event-aware milestone evaluation (WOS-INTEG-MILE-1301).
+///
+/// Identical to [`evaluate_milestones`] but threads an optional
+/// [`MilestoneEventContext`] so a milestone's `activationCriteria` can be
+/// evaluated against the draining event. The `condition` path is unchanged and
+/// still governs every milestone; `activationCriteria` is an additive fire
+/// signal (either-matches), preserving fire-once semantics via
+/// `fired_milestones`.
+pub fn evaluate_milestones_with_event(
+    kernel: &KernelDocument,
+    instance: &mut WorkflowProcess,
+    post_state: &serde_json::Value,
+    event_ctx: Option<&MilestoneEventContext<'_>>,
 ) -> Vec<ProvenanceRecord> {
     if kernel.lifecycle.milestones.is_empty() {
         return Vec::new();
@@ -52,7 +95,33 @@ pub fn evaluate_milestones(
 
         let milestone = &kernel.lifecycle.milestones[id];
 
-        if milestone_condition_true(&milestone.condition, &case_map) {
+        // Either the FEL `condition` is truthy over the post-event case state,
+        // or (WOS-INTEG-MILE-1301) the optional `activationCriteria` matches the
+        // draining event. Both are additive fire signals; fire-once is preserved
+        // by the `fired_milestones` guard above.
+        let condition_fires = milestone_condition_true(&milestone.condition, &case_map);
+        let criteria_fires = match (&milestone.activation_criteria, event_ctx) {
+            (Some(criteria), Some(ctx)) => {
+                let act_ctx = ActivationContext {
+                    event_name: ctx.event_name,
+                    event_data: ctx.event_data,
+                    event_tags: &[],
+                    event_kind: None,
+                    actor_id: ctx.actor_id,
+                    actor_roles: ctx.actor_roles,
+                    actor_type: ctx.actor_type,
+                    case_state: post_state,
+                    transition_tags: &[],
+                    now_ms: ctx.now_ms,
+                    trigger_actor_id: None,
+                    is_related_event: false,
+                };
+                evaluate_activation_criteria(criteria, &act_ctx).matched
+            }
+            _ => false,
+        };
+
+        if condition_fires || criteria_fires {
             instance.fired_milestones.insert(id.clone());
             records.push(ProvenanceRecord {
                 id: ProvenanceRecord::mint_id(),
@@ -249,6 +318,97 @@ mod tests {
             records[1].data.as_ref().unwrap()["milestoneId"],
             "zMilestone"
         );
+    }
+
+    // ── WOS-INTEG-MILE-1301: activationCriteria fires on the draining event ──
+
+    #[test]
+    fn activation_criteria_fires_on_event_when_condition_false() {
+        // `condition` references a field that is never true; `activationCriteria`
+        // fires on the event name instead.
+        let kernel = kernel_with_milestones(&serde_json::json!({
+            "intakeAcknowledged": {
+                "condition": "caseFile.acknowledged == true",
+                "activationCriteria": { "on": { "event": "intakeReceived" } }
+            }
+        }));
+        let mut instance = bare_instance();
+        let state = serde_json::json!({ "acknowledged": false });
+        let roles: Vec<String> = Vec::new();
+        let ctx = MilestoneEventContext {
+            event_name: "intakeReceived",
+            event_data: None,
+            actor_id: None,
+            actor_roles: &roles,
+            actor_type: None,
+            now_ms: 0,
+        };
+
+        // Without the matching event: condition is false → no fire.
+        let none =
+            evaluate_milestones_with_event(&kernel, &mut instance, &state, None);
+        assert!(none.is_empty());
+        assert!(!instance.fired_milestones.contains("intakeAcknowledged"));
+
+        // With the matching event: activationCriteria fires it.
+        let records =
+            evaluate_milestones_with_event(&kernel, &mut instance, &state, Some(&ctx));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].record_kind, ProvenanceKind::MilestoneFired);
+        assert_eq!(
+            records[0].data,
+            Some(serde_json::json!({ "milestoneId": "intakeAcknowledged" }))
+        );
+        assert!(instance.fired_milestones.contains("intakeAcknowledged"));
+    }
+
+    #[test]
+    fn activation_criteria_respects_fire_once() {
+        let kernel = kernel_with_milestones(&serde_json::json!({
+            "m1": {
+                "condition": "caseFile.never == true",
+                "activationCriteria": { "on": { "event": "ping" } }
+            }
+        }));
+        let mut instance = bare_instance();
+        let state = serde_json::json!({});
+        let roles: Vec<String> = Vec::new();
+        let ctx = MilestoneEventContext {
+            event_name: "ping",
+            event_data: None,
+            actor_id: None,
+            actor_roles: &roles,
+            actor_type: None,
+            now_ms: 0,
+        };
+        let first = evaluate_milestones_with_event(&kernel, &mut instance, &state, Some(&ctx));
+        assert_eq!(first.len(), 1);
+        // A second matching event must not re-fire.
+        let second = evaluate_milestones_with_event(&kernel, &mut instance, &state, Some(&ctx));
+        assert!(second.is_empty(), "milestone must fire at most once");
+    }
+
+    #[test]
+    fn activation_criteria_does_not_fire_on_event_mismatch() {
+        let kernel = kernel_with_milestones(&serde_json::json!({
+            "m1": {
+                "condition": "caseFile.never == true",
+                "activationCriteria": { "on": { "event": "wanted" } }
+            }
+        }));
+        let mut instance = bare_instance();
+        let state = serde_json::json!({});
+        let roles: Vec<String> = Vec::new();
+        let ctx = MilestoneEventContext {
+            event_name: "other",
+            event_data: None,
+            actor_id: None,
+            actor_roles: &roles,
+            actor_type: None,
+            now_ms: 0,
+        };
+        let records = evaluate_milestones_with_event(&kernel, &mut instance, &state, Some(&ctx));
+        assert!(records.is_empty());
     }
 
     #[test]

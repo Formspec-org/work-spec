@@ -17,7 +17,9 @@ use std::collections::HashMap;
 use fel_core::{MapEnvironment, evaluate, json_to_fel, parse, types::Value};
 use wos_events::ActorKind;
 
-use crate::model::activation::{ActivationCriteria, ActivationTrigger, ActorConstraint};
+use crate::model::activation::{
+    ActivationCriteria, ActivationTrigger, ActorConstraint, EventScope,
+};
 
 /// Runtime inputs to activation evaluation.
 ///
@@ -46,6 +48,13 @@ pub struct ActivationContext<'a> {
     /// Actor that activated the obligation, for `notSameAsTriggerActor`
     /// (satisfaction/violation context only; `None` on activation).
     pub trigger_actor_id: Option<&'a str>,
+    /// Whether this event was surfaced from a *related* case rather than the
+    /// case being evaluated (ADR 0096; WOS-INTEG-REL-2101). A trigger whose
+    /// `event_scope` is `related` matches ONLY when this is `true`; a trigger
+    /// scoped to `this` (the default) matches ONLY when this is `false`.
+    /// Defaults to `false` (own-case event); the related-case event source is a
+    /// runtime follow-up, so the reference drain currently always passes `false`.
+    pub is_related_event: bool,
 }
 
 impl<'a> ActivationContext<'a> {
@@ -63,6 +72,7 @@ impl<'a> ActivationContext<'a> {
             transition_tags: &[],
             now_ms,
             trigger_actor_id: None,
+            is_related_event: false,
         }
     }
 }
@@ -164,6 +174,22 @@ fn mismatch(reason: ActivationDecisionReason) -> ActivationDecision {
 }
 
 fn trigger_matches(trigger: &ActivationTrigger, ctx: &ActivationContext<'_>) -> bool {
+    // Event scope (WOS-INTEG-REL-2101): `related` matches only related-case
+    // events; the default (`this`, or absent) matches only own-case events.
+    // The scope gate runs first because a trigger that names the right event on
+    // the wrong case MUST NOT match.
+    match trigger.event_scope {
+        Some(EventScope::Related) => {
+            if !ctx.is_related_event {
+                return false;
+            }
+        }
+        Some(EventScope::This) | None => {
+            if ctx.is_related_event {
+                return false;
+            }
+        }
+    }
     if let Some(event) = &trigger.event {
         if event != ctx.event_name {
             return false;
@@ -343,6 +369,7 @@ mod tests {
             transition_tags: &[],
             now_ms: 0,
             trigger_actor_id: None,
+            is_related_event: false,
         }
     }
 
@@ -531,6 +558,48 @@ mod tests {
         // Different actor: matches.
         ctx.actor_id = Some("agent-2");
         assert!(evaluate_activation_criteria(&c, &ctx).matched);
+    }
+
+    #[test]
+    fn event_scope_related_matches_only_related_events() {
+        use crate::model::activation::EventScope;
+        let cs = serde_json::json!({});
+        let c = ActivationCriteria {
+            on: Some(ActivationTrigger {
+                event: Some("incomeChanged".into()),
+                event_scope: Some(EventScope::Related),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        // Own-case event with `related` scope: must not match.
+        let own = ctx_for("incomeChanged", None, &cs);
+        let d = evaluate_activation_criteria(&c, &own);
+        assert!(!d.matched);
+        assert_eq!(d.reason, ActivationDecisionReason::TriggerMismatch);
+        // Related-case event with `related` scope: matches.
+        let mut related = ctx_for("incomeChanged", None, &cs);
+        related.is_related_event = true;
+        assert!(evaluate_activation_criteria(&c, &related).matched);
+    }
+
+    #[test]
+    fn default_scope_matches_only_own_case_events() {
+        let cs = serde_json::json!({});
+        // No `event_scope` → defaults to `this` (own-case only).
+        let c = ActivationCriteria {
+            on: Some(ActivationTrigger {
+                event: Some("incomeChanged".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let own = ctx_for("incomeChanged", None, &cs);
+        assert!(evaluate_activation_criteria(&c, &own).matched);
+        // A related-case event MUST NOT satisfy a `this`-scoped (default) trigger.
+        let mut related = ctx_for("incomeChanged", None, &cs);
+        related.is_related_event = true;
+        assert!(!evaluate_activation_criteria(&c, &related).matched);
     }
 
     #[test]
