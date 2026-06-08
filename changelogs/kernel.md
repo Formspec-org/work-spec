@@ -13,7 +13,22 @@ release-trains plan lands) are computed by Changesets.
 
 ## [Unreleased]
 
-_Nothing staged._
+### Added
+
+- **Durable-obligation kernel/runtime + checking surface** ([ADR 0096](../thoughts/adr/0096-shared-activation-criteria-and-durable-obligations.md);
+  cross-cutting artifacts follow kernel per [`RELEASE-STREAMS.md`](../RELEASE-STREAMS.md)).
+  `wos-core` gains the `ActivationCriteria` / `ObligationPolicy` model and a deterministic
+  activation evaluator; `wos-runtime` gains the obligation monitor wired into `drain_once`
+  (activation / satisfaction / cancellation, pre-event violate-block, lazy deadline expiry,
+  violation-action effects with strictest-action gating, replay dedupe, count cap,
+  fail-closed posture, bypass/extension authorizer); `wos-events` adds seven obligation
+  `ProvenanceKind` variants plus witness and PROV-O/XES/OCEL export; `wos-lint` registers
+  `ACT-001..010` (Tier 2, all `draft` — unit-test evidence, fixtures land with the OBL-*
+  batch); `wos-conformance` carries 13 `OBL-001..013` fixtures (authored, not yet run).
+  The standalone repo cannot compile Rust (fel-core + private siblings absent); the
+  authoritative gate is the formspec-stack monorepo CI / `rust-tests.yml` once
+  `STACK_REPOS_TOKEN` is set. See [`docs/obligation-conformance.md`](../docs/obligation-conformance.md).
+  Governance semantics are detailed in [`changelogs/governance.md`](governance.md).
 
 ## [1.0.0] — 2026-04-20
 

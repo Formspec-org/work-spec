@@ -1,0 +1,85 @@
+{
+  "_note": "AUTHORED-NOT-RUN (see OBL-001 _note). Role==actor_id: first the actor 'caseworker' fires underwritingReviewCompleted; its derived role 'caseworker' != required 'underwriter', so satisfyWhen does NOT match and the obligation stays Pending (no ObligationSatisfied for that event). Then actor 'underwriter' fires the same event; role matches and notSameAsTriggerActor holds (trigger actor was 'caseworker'), so ObligationSatisfied is emitted. Only ONE obligationSatisfied is expected. underwritingReviewCompleted is a self-loop on 'open' so both attempts drain.",
+  "id": "WOS-CONF-2307-OBL-007-actor-role-mismatch",
+  "rule": "WOS-OBL-RUNTIME-0905",
+  "description": "Actor role gate: a wrong-role actor does not satisfy the obligation; a correct-role independent actor does (ActorConstraint.role + notSameAsTriggerActor; ADR 0096).",
+  "documents": {
+    "kernel": "inline"
+  },
+  "inline_documents": {
+    "kernel": {
+      "$wosWorkflow": "1.0",
+      "url": "urn:test:OBL-007",
+      "version": "1.0.0",
+      "title": "OBL-007 Actor Role Mismatch",
+      "status": "active",
+      "impactLevel": "rightsImpacting",
+      "actors": [
+        { "id": "caseworker", "type": "human", "description": "Caseworker (not an underwriter)" },
+        { "id": "underwriter", "type": "human", "description": "Independent underwriter" }
+      ],
+      "lifecycle": {
+        "initialState": "open",
+        "states": {
+          "open": {
+            "type": "atomic",
+            "transitions": [
+              { "event": "caseFileUpdated", "target": "open" },
+              { "event": "underwritingReviewCompleted", "target": "open" }
+            ]
+          }
+        }
+      },
+      "caseFile": {
+        "fields": {
+          "income": { "type": "number" }
+        }
+      },
+      "governance": {
+        "obligationPolicies": [
+          {
+            "id": "income-change-review-required",
+            "activateWhen": { "on": { "event": "caseFileUpdated" }, "where": "event.field = 'income'" },
+            "satisfyWhen": {
+              "on": { "event": "underwritingReviewCompleted" },
+              "actor": { "role": "underwriter", "notSameAsTriggerActor": true }
+            },
+            "responsibleRole": "underwriter",
+            "duplicatePolicy": "ignoreWhilePending",
+            "onViolation": "block"
+          }
+        ]
+      },
+      "execution": {
+        "workflowTimeout": "P90D",
+        "defaultTaskTimeout": "P7D",
+        "instanceVersioning": "pinned"
+      }
+    }
+  },
+  "initial_case_state": {},
+  "event_sequence": [
+    { "event": "caseFileUpdated", "actor": "caseworker", "data": { "field": "income" } },
+    { "event": "underwritingReviewCompleted", "actor": "caseworker" },
+    { "event": "underwritingReviewCompleted", "actor": "underwriter" }
+  ],
+  "expected_transitions": [
+    { "from": "open", "target": "open", "event": "caseFileUpdated" },
+    { "from": "open", "target": "open", "event": "underwritingReviewCompleted" },
+    { "from": "open", "target": "open", "event": "underwritingReviewCompleted" }
+  ],
+  "expected_provenance": [
+    {
+      "record_kind": "obligationActivated",
+      "data": { "policyId": "income-change-review-required", "obligationId": "income-change-review-required#0" }
+    },
+    {
+      "record_kind": "obligationSatisfied",
+      "data": {
+        "policyId": "income-change-review-required",
+        "obligationId": "income-change-review-required#0",
+        "satisfyingActor": "underwriter"
+      }
+    }
+  ]
+}

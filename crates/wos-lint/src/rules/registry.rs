@@ -92,6 +92,127 @@ pub fn all_lint_rules() -> &'static [RuleMetadata] {
 /// code are intentionally absent — the registry describes present reality,
 /// not the normative catalog.
 static ALL_LINT_RULES: &[RuleMetadata] = &[
+    // --- ACT (Activation Criteria / Durable Obligations, ADR 0096) ----
+    RuleMetadata {
+        id: "ACT-001",
+        tier: Tier::T2,
+        severity: LintSeverity::Error,
+        summary: "Obligation-policy activation criteria `where` MUST be valid FEL.",
+        fixtures: &[],
+        graduation: Graduation::Draft,
+        spec_ref: Some("governance/workflow-governance.md#16.1.2"),
+        suggested_fix: Some(
+            "Fix the FEL syntax in the activation criteria `where` expression.",
+        ),
+    },
+    RuleMetadata {
+        id: "ACT-002",
+        tier: Tier::T2,
+        severity: LintSeverity::Warning,
+        summary: "Obligation-policy activation criteria `where` AST root MUST be boolean-shaped (no truthy coercion).",
+        fixtures: &[],
+        graduation: Graduation::Draft,
+        spec_ref: Some("governance/workflow-governance.md#16.1.2"),
+        suggested_fix: Some(
+            "Make `where` a boolean expression (comparison/logical), not a bare field or literal.",
+        ),
+    },
+    RuleMetadata {
+        id: "ACT-003",
+        tier: Tier::T2,
+        severity: LintSeverity::Warning,
+        summary: "Activation trigger `on.event` SHOULD resolve to a known workflow event.",
+        fixtures: &[],
+        graduation: Graduation::Draft,
+        spec_ref: Some("governance/workflow-governance.md#16.4"),
+        suggested_fix: Some(
+            "Use a transition or timer-fire event declared in the workflow lifecycle.",
+        ),
+    },
+    RuleMetadata {
+        id: "ACT-004",
+        tier: Tier::T2,
+        severity: LintSeverity::Warning,
+        summary: "Activation `requiredData` paths SHOULD resolve to known case-file fields.",
+        fixtures: &[],
+        graduation: Graduation::Draft,
+        spec_ref: Some("governance/workflow-governance.md#16.4"),
+        suggested_fix: Some(
+            "Declare the field under `caseFile.fields`, or fix the dotted path.",
+        ),
+    },
+    RuleMetadata {
+        id: "ACT-005",
+        tier: Tier::T2,
+        severity: LintSeverity::Error,
+        summary: "Activation/deadline `within` MUST be a valid ISO-8601 / `P<N>BD` duration.",
+        fixtures: &[],
+        graduation: Graduation::Draft,
+        spec_ref: Some("governance/workflow-governance.md#16.4"),
+        suggested_fix: Some(
+            "Use an ISO-8601 duration (e.g. `P3D`, `PT12H`) or the business-day form `P<N>BD`.",
+        ),
+    },
+    RuleMetadata {
+        id: "ACT-006",
+        tier: Tier::T2,
+        severity: LintSeverity::Warning,
+        summary: "Business-day `within` SHOULD declare a resolvable `calendarRef`.",
+        fixtures: &[],
+        graduation: Graduation::Draft,
+        spec_ref: Some("governance/workflow-governance.md#16.4"),
+        suggested_fix: Some(
+            "Add a sibling `calendarRef` so business days resolve against a known calendar.",
+        ),
+    },
+    RuleMetadata {
+        id: "ACT-007",
+        tier: Tier::T2,
+        severity: LintSeverity::Error,
+        summary: "`activationCriteriaRef` MUST resolve to a named criteria (no duplicate ids).",
+        fixtures: &[],
+        graduation: Graduation::Draft,
+        spec_ref: Some("governance/workflow-governance.md#16.4"),
+        suggested_fix: Some(
+            "Point `activationCriteriaRef` at an existing local `#/$defs/...` node or a valid URI.",
+        ),
+    },
+    RuleMetadata {
+        id: "ACT-008",
+        tier: Tier::T2,
+        severity: LintSeverity::Error,
+        summary: "Milestone `activationCriteria.where` MUST be valid, boolean-shaped FEL (WOS-INTEG-MILE-1302).",
+        fixtures: &[],
+        graduation: Graduation::Draft,
+        spec_ref: Some("governance/workflow-governance.md#16.3"),
+        suggested_fix: Some(
+            "Make the milestone `activationCriteria.where` a valid boolean FEL expression; the legacy `condition` field stays under K-013.",
+        ),
+    },
+    RuleMetadata {
+        id: "ACT-009",
+        tier: Tier::T2,
+        severity: LintSeverity::Warning,
+        summary: "Obligation `satisfyWhen.on.event` SHOULD be reachable in the static event graph (WOS-TOOL-2502).",
+        fixtures: &[],
+        graduation: Graduation::Draft,
+        spec_ref: Some("governance/workflow-governance.md#16.4"),
+        suggested_fix: Some(
+            "Name a satisfaction event the workflow can raise, or use a `$`-prefixed dynamic event for externally-raised events.",
+        ),
+    },
+    RuleMetadata {
+        id: "ACT-010",
+        tier: Tier::T2,
+        severity: LintSeverity::Error,
+        summary: "Obligation `onViolation.createTask.taskRef`/`emitEvent.event` MUST resolve (WOS-TOOL-2503).",
+        fixtures: &[],
+        graduation: Graduation::Draft,
+        spec_ref: Some("governance/workflow-governance.md#16.4"),
+        suggested_fix: Some(
+            "Point `createTask.taskRef` at a known task (taskCatalog/tasks/contracts) and `emitEvent.event` at a valid event name.",
+        ),
+    },
     // --- AG (Advanced Governance) -------------------------------------
     RuleMetadata {
         id: "AG-008",

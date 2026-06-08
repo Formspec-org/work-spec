@@ -19,6 +19,7 @@
 //! - `wos-conformance` feeds events through the evaluation algorithm.
 //! - A future `wos-runtime` adapts the algorithm to Temporal, Step Functions, etc.
 
+pub mod activation;
 pub mod agent;
 pub mod autonomy;
 pub mod business_calendar;
@@ -44,12 +45,25 @@ pub use agent::{
     AgentContext, AgentInvocationError, AgentInvoker, AgentInvokerRegistry, AgentResult, AgentTask,
     InvokerKind, InvokerSpec, StubResponse,
 };
+pub use activation::{
+    ActivationContext, ActivationDecision, ActivationDecisionReason, DeadlineHint,
+    evaluate_activation_criteria,
+};
 pub use context::EvalContext;
 pub use eval::{
     Configuration, EvalError, Evaluator, IndexedState, ObservedAction, ObservedTransition,
     parse_iso_duration_to_ms,
 };
+pub use model::activation::{
+    ActivationCriteria, ActivationCriteriaRef, ActivationCriteriaUse, ActivationTrigger,
+    ActorConstraint, EventKind, RequiredDataPath,
+};
 pub use model::ai::AIIntegrationDocument;
+pub use model::obligation::{
+    DuplicatePolicy, ObligationDeadline, ObligationPolicy, ObligationStatus,
+    ObligationViolationAction, ObligationWarningThreshold, PendingObligation,
+    ShorthandViolationAction, ViolationActionKind, ViolationActionSpec,
+};
 pub use model::business_calendar::BusinessCalendarDocument;
 pub use model::governance::{GovernanceDocument, HoldType};
 pub use model::kernel::{

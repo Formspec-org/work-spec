@@ -1,0 +1,82 @@
+{
+  "_note": "Phase-7 durable-obligation conformance (ADR 0096 / Governance §16). EXPECTED TRACES AUTHORED-NOT-RUN: this sandbox lacks the fel-core sibling so the WOS runtime cannot execute. expected_transitions/expected_provenance were authored best-effort from spec + wos-runtime/src/obligations.rs + drain.rs semantics and MUST be confirmed once CI can execute the suite. Role==actor_id convention: the runtime derives the actor's single role from its actor id (drain.rs resolve_actor_kind + id-as-role), so satisfying an 'underwriter' role requires actor id 'underwriter'.",
+  "id": "WOS-CONF-2301-OBL-001-activation-creates-pending",
+  "rule": "WOS-OBL-RUNTIME-0903",
+  "description": "Activation: a caseFileUpdated event whose where-guard matches (event.field='income') creates one pending obligation and emits ObligationActivated (ADR 0096 §16.2.3 step 6).",
+  "documents": {
+    "kernel": "inline"
+  },
+  "inline_documents": {
+    "kernel": {
+      "$wosWorkflow": "1.0",
+      "url": "urn:test:OBL-001",
+      "version": "1.0.0",
+      "title": "OBL-001 Obligation Activation",
+      "status": "active",
+      "impactLevel": "rightsImpacting",
+      "actors": [
+        { "id": "caseworker", "type": "human", "description": "Caseworker who edits the case file" },
+        { "id": "underwriter", "type": "human", "description": "Independent underwriter" }
+      ],
+      "lifecycle": {
+        "initialState": "open",
+        "states": {
+          "open": {
+            "type": "atomic",
+            "transitions": [
+              { "event": "caseFileUpdated", "target": "open" }
+            ]
+          }
+        }
+      },
+      "caseFile": {
+        "fields": {
+          "income": { "type": "number" }
+        }
+      },
+      "governance": {
+        "obligationPolicies": [
+          {
+            "id": "income-change-review-required",
+            "description": "An income change requires independent underwriting review before final approval.",
+            "activateWhen": { "on": { "event": "caseFileUpdated" }, "where": "event.field = 'income'" },
+            "satisfyWhen": {
+              "on": { "event": "underwritingReviewCompleted" },
+              "actor": { "role": "underwriter", "notSameAsTriggerActor": true }
+            },
+            "violateWhen": { "on": { "event": "finalApprovalRequested" } },
+            "responsibleRole": "underwriter",
+            "duplicatePolicy": "ignoreWhilePending",
+            "onViolation": "block"
+          }
+        ]
+      },
+      "execution": {
+        "workflowTimeout": "P90D",
+        "defaultTaskTimeout": "P7D",
+        "instanceVersioning": "pinned"
+      }
+    }
+  },
+  "initial_case_state": {},
+  "event_sequence": [
+    {
+      "event": "caseFileUpdated",
+      "actor": "caseworker",
+      "data": { "field": "income" }
+    }
+  ],
+  "expected_transitions": [
+    { "from": "open", "target": "open", "event": "caseFileUpdated" }
+  ],
+  "expected_provenance": [
+    {
+      "record_kind": "obligationActivated",
+      "data": {
+        "policyId": "income-change-review-required",
+        "obligationId": "income-change-review-required#0",
+        "triggerEvent": "caseFileUpdated"
+      }
+    }
+  ]
+}

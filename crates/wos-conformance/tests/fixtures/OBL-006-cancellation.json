@@ -1,0 +1,84 @@
+{
+  "_note": "AUTHORED-NOT-RUN (see OBL-001 _note). cancelWhen on 'caseWithdrawn' marks the obligation Cancelled (evaluate_cancellations) -> ObligationCancelled. The subsequent P3D delay must NOT expire it: evaluate_deadline_expiries only scans rows still Pending (pending_snapshot returns None for terminal rows), so a Cancelled obligation never fires a late ObligationExpired. The harness cannot assert absence via expected_provenance; a dedicated harness test should assert obligationExpired count == 0 after the delay. The 'noop' delay-carrier event is unmatched-and-ignored.",
+  "id": "WOS-CONF-2306-OBL-006-cancellation",
+  "rule": "WOS-OBL-RUNTIME-0906",
+  "description": "Cancellation: a cancelWhen match cancels the pending obligation (ObligationCancelled); a later deadline elapse does not expire the already-terminal obligation (ADR 0096 §16.2).",
+  "documents": {
+    "kernel": "inline"
+  },
+  "inline_documents": {
+    "kernel": {
+      "$wosWorkflow": "1.0",
+      "url": "urn:test:OBL-006",
+      "version": "1.0.0",
+      "title": "OBL-006 Obligation Cancellation",
+      "status": "active",
+      "impactLevel": "rightsImpacting",
+      "actors": [
+        { "id": "caseworker", "type": "human", "description": "Caseworker" },
+        { "id": "underwriter", "type": "human", "description": "Independent underwriter" },
+        { "id": "system", "type": "system", "description": "System clock actor" }
+      ],
+      "lifecycle": {
+        "initialState": "open",
+        "states": {
+          "open": {
+            "type": "atomic",
+            "transitions": [
+              { "event": "caseFileUpdated", "target": "open" },
+              { "event": "caseWithdrawn", "target": "withdrawn" }
+            ]
+          },
+          "withdrawn": { "type": "final" }
+        }
+      },
+      "caseFile": {
+        "fields": {
+          "income": { "type": "number" }
+        }
+      },
+      "governance": {
+        "obligationPolicies": [
+          {
+            "id": "income-change-review-required",
+            "activateWhen": { "on": { "event": "caseFileUpdated" }, "where": "event.field = 'income'" },
+            "satisfyWhen": {
+              "on": { "event": "underwritingReviewCompleted" },
+              "actor": { "role": "underwriter", "notSameAsTriggerActor": true }
+            },
+            "cancelWhen": { "on": { "event": "caseWithdrawn" } },
+            "deadline": { "within": "P2D" },
+            "responsibleRole": "underwriter",
+            "duplicatePolicy": "ignoreWhilePending",
+            "onViolation": "block"
+          }
+        ]
+      },
+      "execution": {
+        "workflowTimeout": "P90D",
+        "defaultTaskTimeout": "P7D",
+        "instanceVersioning": "pinned"
+      }
+    }
+  },
+  "initial_case_state": {},
+  "event_sequence": [
+    { "event": "caseFileUpdated", "actor": "caseworker", "data": { "field": "income" } },
+    { "event": "caseWithdrawn", "actor": "caseworker" },
+    { "event": "noop", "actor": "system", "delay": "P3D" }
+  ],
+  "expected_transitions": [
+    { "from": "open", "target": "open", "event": "caseFileUpdated" },
+    { "from": "open", "target": "withdrawn", "event": "caseWithdrawn" }
+  ],
+  "expected_provenance": [
+    {
+      "record_kind": "obligationActivated",
+      "data": { "policyId": "income-change-review-required", "obligationId": "income-change-review-required#0" }
+    },
+    {
+      "record_kind": "obligationCancelled",
+      "data": { "policyId": "income-change-review-required", "obligationId": "income-change-review-required#0" }
+    }
+  ]
+}

@@ -34,9 +34,42 @@
 
 use serde_json::{Map, Value, json};
 
-use wos_core::{ProvenanceLog, ProvenanceRecord};
+use wos_core::{ProvenanceKind, ProvenanceLog, ProvenanceRecord};
 
 use crate::{ExportConfig, camel_case_record_kind, is_facts_tier};
+
+/// Whether a record is a durable-obligation lifecycle record (ADR 0096).
+///
+/// Obligation records carry `obligationId` (and `policyId`) in their `data`
+/// payload; this exporter promotes each distinct `obligationId` to a
+/// first-class OCEL Object (type `obligation`) so process-mining tooling can
+/// follow an obligation across its activate → satisfy/violate/expire/bypass
+/// arc independent of the workflow instance object.
+fn is_obligation_kind(kind: ProvenanceKind) -> bool {
+    matches!(
+        kind,
+        ProvenanceKind::ObligationActivated
+            | ProvenanceKind::ObligationSatisfied
+            | ProvenanceKind::ObligationViolated
+            | ProvenanceKind::ObligationCancelled
+            | ProvenanceKind::ObligationExpired
+            | ProvenanceKind::ObligationBypassed
+            | ProvenanceKind::ObligationWarning
+    )
+}
+
+/// Extract the `obligationId` carried in an obligation record's `data` payload.
+/// Returns `None` for non-obligation records or when the payload is malformed.
+fn obligation_id(record: &ProvenanceRecord) -> Option<&str> {
+    if !is_obligation_kind(record.record_kind) {
+        return None;
+    }
+    record
+        .data
+        .as_ref()
+        .and_then(|data| data.get("obligationId"))
+        .and_then(Value::as_str)
+}
 
 /// Serialize a provenance log as an OCEL 2.0 JSON document (§6.4).
 ///
@@ -69,16 +102,26 @@ pub fn export(log: &ProvenanceLog, config: &ExportConfig) -> Value {
     })
 }
 
-/// Fixed `objectTypes` array. OCEL 2.0 requires typed objects; this phase
-/// exposes exactly one type (`wf-instance`) since only the instance itself is
-/// modelled as an object.
+/// `objectTypes` array. OCEL 2.0 requires typed objects. This exporter models
+/// the workflow instance (`wf-instance`) and — per ADR 0096 / WOS-OBL-EXPORT-1203
+/// — each durable obligation (`obligation`) as a first-class object so an
+/// obligation's lifecycle is followable across events. Case-File-Item objects
+/// remain the documented upstream gap (see module docs).
 fn object_types() -> Value {
-    json!([{
-        "name": "wf-instance",
-        "attributes": [
-            { "name": "processId", "type": "string" }
-        ],
-    }])
+    json!([
+        {
+            "name": "wf-instance",
+            "attributes": [
+                { "name": "processId", "type": "string" }
+            ],
+        },
+        {
+            "name": "obligation",
+            "attributes": [
+                { "name": "policyId", "type": "string" }
+            ],
+        }
+    ])
 }
 
 /// Deduplicate `record_kind` occurrences into an OCEL `eventTypes` array.
@@ -122,10 +165,11 @@ fn static_event_attribute_schema() -> Value {
     ])
 }
 
-/// Emit the single `wf-instance` object. Its `processId` attribute carries
-/// the earliest non-empty record timestamp (falling back to `""` when the log
-/// contains no stamped records) so downstream OCEL tools can anchor the
-/// object in the event timeline.
+/// Emit the `wf-instance` object plus one `obligation` object per distinct
+/// `obligationId` (ADR 0096 / WOS-OBL-EXPORT-1203). The `wf-instance`
+/// `processId` attribute carries the earliest non-empty record timestamp
+/// (falling back to `""` when the log contains no stamped records) so
+/// downstream OCEL tools can anchor the object in the event timeline.
 fn objects(config: &ExportConfig, records: &[&ProvenanceRecord]) -> Value {
     // Lexicographic `.min()` over timestamps is only correct when every
     // timestamp uses the same UTC form (`...Z`). The WOS runtime emits
@@ -142,7 +186,7 @@ fn objects(config: &ExportConfig, records: &[&ProvenanceRecord]) -> Value {
         .min()
         .unwrap_or("");
 
-    json!([{
+    let mut objects: Vec<Value> = vec![json!({
         "id": config.process_id,
         "type": "wf-instance",
         "attributes": [{
@@ -150,7 +194,55 @@ fn objects(config: &ExportConfig, records: &[&ProvenanceRecord]) -> Value {
             "time": earliest,
             "value": config.process_id,
         }],
-    }])
+    })];
+
+    // WOS-OBL-EXPORT-1203: one `obligation` object per distinct obligationId.
+    // First-seen order keeps snapshot diffs stable (mirrors the eventTypes
+    // dedup ordering). The object's `policyId` attribute is timestamped with
+    // the earliest event that referenced the obligation so OCEL tooling can
+    // anchor it in the timeline; `policyId` itself is taken from the first
+    // record that carries one (an obligation has exactly one policy).
+    let mut seen: Vec<String> = Vec::new();
+    for record in records {
+        let Some(id) = obligation_id(record) else {
+            continue;
+        };
+        if seen.iter().any(|existing| existing == id) {
+            continue;
+        }
+        seen.push(id.to_string());
+
+        let policy_id = records
+            .iter()
+            .filter(|other| obligation_id(other) == Some(id))
+            .find_map(|other| {
+                other
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("policyId"))
+                    .and_then(Value::as_str)
+            })
+            .unwrap_or("");
+        let object_earliest = records
+            .iter()
+            .filter(|other| obligation_id(other) == Some(id))
+            .map(|other| other.timestamp.as_str())
+            .filter(|timestamp| !timestamp.is_empty())
+            .min()
+            .unwrap_or("");
+
+        objects.push(json!({
+            "id": id,
+            "type": "obligation",
+            "attributes": [{
+                "name": "policyId",
+                "time": object_earliest,
+                "value": policy_id,
+            }],
+        }));
+    }
+
+    Value::Array(objects)
 }
 
 /// Emit a single OCEL event for a record at position `index`.
@@ -162,10 +254,16 @@ fn event_node(index: usize, record: &ProvenanceRecord, process_id: &str) -> Valu
     // rationale. OCEL requires the field to be present on every event.
     node.insert("time".into(), Value::String(record.timestamp.clone()));
     node.insert("attributes".into(), Value::Array(event_attributes(record)));
-    node.insert(
-        "relationships".into(),
-        json!([{ "objectId": process_id, "qualifier": "relates-to" }]),
-    );
+
+    // Every event relates to the workflow instance. Obligation lifecycle
+    // events additionally link to their `obligation` object via the `concerns`
+    // qualifier (WOS-OBL-EXPORT-1203) so the obligation's arc is recoverable.
+    let mut relationships = vec![json!({ "objectId": process_id, "qualifier": "relates-to" })];
+    if let Some(id) = obligation_id(record) {
+        relationships.push(json!({ "objectId": id, "qualifier": "concerns" }));
+    }
+    node.insert("relationships".into(), Value::Array(relationships));
+
     Value::Object(node)
 }
 
@@ -396,16 +494,136 @@ mod tests {
 
         let document = export(&log, &config());
 
+        // No obligation records present → exactly the single wf-instance object.
         let objects = document["objects"].as_array().expect("objects array");
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0]["id"], "instance-abc");
         assert_eq!(objects[0]["type"], "wf-instance");
 
+        // `objectTypes` now always declares both the instance and obligation
+        // types (WOS-OBL-EXPORT-1203); obligation objects only materialize when
+        // obligation records are present.
         let object_types = document["objectTypes"]
             .as_array()
             .expect("objectTypes array");
-        assert_eq!(object_types.len(), 1);
-        assert_eq!(object_types[0]["name"], "wf-instance");
+        let type_names: Vec<&str> = object_types
+            .iter()
+            .map(|t| t["name"].as_str().expect("object type name"))
+            .collect();
+        assert_eq!(type_names, ["wf-instance", "obligation"]);
+    }
+
+    /// Build an obligation lifecycle record carrying the `obligationId` /
+    /// `policyId` payload the OCEL exporter promotes to a first-class object.
+    fn obligation_record(
+        kind: ProvenanceKind,
+        policy_id: &str,
+        obligation_id: &str,
+        timestamp: &str,
+    ) -> ProvenanceRecord {
+        let mut record = stamped(kind, timestamp);
+        record.data = Some(json!({
+            "policyId": policy_id,
+            "obligationId": obligation_id,
+        }));
+        record
+    }
+
+    #[test]
+    fn promotes_each_obligation_to_a_first_class_ocel_object() {
+        // WOS-OBL-EXPORT-1203: distinct obligationIds each become one
+        // `obligation` object; repeated ids dedup to a single object.
+        let mut log = ProvenanceLog::default();
+        log.push(obligation_record(
+            ProvenanceKind::ObligationActivated,
+            "policy-1",
+            "obl-1",
+            "2026-01-01T00:00:00Z",
+        ));
+        log.push(obligation_record(
+            ProvenanceKind::ObligationViolated,
+            "policy-1",
+            "obl-1",
+            "2026-01-01T00:00:05Z",
+        ));
+        log.push(obligation_record(
+            ProvenanceKind::ObligationActivated,
+            "policy-2",
+            "obl-2",
+            "2026-01-01T00:00:10Z",
+        ));
+
+        let document = export(&log, &config());
+
+        let objects = document["objects"].as_array().expect("objects array");
+        // wf-instance + two distinct obligations.
+        assert_eq!(objects.len(), 3);
+
+        let obligation_objects: Vec<&Value> = objects
+            .iter()
+            .filter(|object| object["type"] == "obligation")
+            .collect();
+        assert_eq!(obligation_objects.len(), 2);
+        // First-seen order: obl-1 before obl-2.
+        assert_eq!(obligation_objects[0]["id"], "obl-1");
+        assert_eq!(obligation_objects[1]["id"], "obl-2");
+        // policyId attribute carried, timestamped with the earliest referencing event.
+        let obl1_attr = &obligation_objects[0]["attributes"][0];
+        assert_eq!(obl1_attr["name"], "policyId");
+        assert_eq!(obl1_attr["value"], "policy-1");
+        assert_eq!(obl1_attr["time"], "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn obligation_events_link_obligation_and_instance_objects() {
+        // WOS-OBL-EXPORT-1203: an obligation event relates to BOTH the
+        // wf-instance (`relates-to`) and its obligation object (`concerns`).
+        let mut log = ProvenanceLog::default();
+        log.push(obligation_record(
+            ProvenanceKind::ObligationViolated,
+            "policy-1",
+            "obl-1",
+            "2026-01-01T00:00:00Z",
+        ));
+
+        let document = export(&log, &config());
+
+        let relationships = document["events"][0]["relationships"]
+            .as_array()
+            .expect("relationships array");
+        assert!(
+            relationships
+                .iter()
+                .any(|r| r == &json!({ "objectId": "instance-abc", "qualifier": "relates-to" })),
+            "obligation event must still relate to wf-instance: {relationships:?}"
+        );
+        assert!(
+            relationships
+                .iter()
+                .any(|r| r == &json!({ "objectId": "obl-1", "qualifier": "concerns" })),
+            "obligation event must link its obligation object: {relationships:?}"
+        );
+    }
+
+    #[test]
+    fn non_obligation_events_carry_only_instance_relationship() {
+        let mut log = ProvenanceLog::default();
+        log.push(stamped(
+            ProvenanceKind::StateTransition,
+            "2026-01-01T00:00:00Z",
+        ));
+
+        let document = export(&log, &config());
+
+        let relationships = document["events"][0]["relationships"]
+            .as_array()
+            .expect("relationships array");
+        assert_eq!(
+            relationships.len(),
+            1,
+            "non-obligation event must not gain a `concerns` link: {relationships:?}"
+        );
+        assert_eq!(relationships[0]["qualifier"], "relates-to");
     }
 
     #[test]

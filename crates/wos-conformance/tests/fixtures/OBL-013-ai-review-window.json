@@ -1,0 +1,94 @@
+{
+  "_note": "AUTHORED-NOT-RUN (see OBL-001 _note). CLAIM-B + DURABLE DUTY (docs/obligation-examples.md §1): a supervisory AGENT's assessment activates an independent-human-review obligation; an independent human reviewer satisfies it; deadline expiry escalates. Role==actor_id: agent actor id 'supervisoryAgent' (type agent) triggers; human actor id 'reviewer' (type human) satisfies (role 'reviewer', notSameAsTriggerActor honored since trigger was the agent). activateWhen uses actor.actorType:'agent' and satisfyWhen actor.actorType:'human' — resolve_actor_kind reads each actor's declared 'type', so the agent/human kinds must be declared in actors[]. This fixture pins the ACTIVATE->SATISFY path. The EXPIRY->ESCALATE alternative (onViolation:escalate -> ObligationExpired+ObligationViolated with effectiveAction:'escalate', plus a rerouted 'supervisor' escalation event) needs a sibling fixture/harness run with a delay > P1D; authored here only as a note. Also confirm whether an agent-type actor requires an agents[] block under schema/lint — the conformance engine deserializes KernelDocument (no full JSON-schema gate), so it runs without one, but a schema-faithful variant may need agents[].",
+  "id": "WOS-CONF-2313-OBL-013-ai-review-window",
+  "rule": "WOS-OBL-RUNTIME-0905",
+  "description": "AI review-window: a supervisory agent's assessment activates an independent-human-review obligation; an independent human review satisfies it (ObligationSatisfied); deadline expiry would escalate (ADR 0096; docs §1).",
+  "documents": {
+    "kernel": "inline"
+  },
+  "inline_documents": {
+    "kernel": {
+      "$wosWorkflow": "1.0",
+      "url": "urn:test:OBL-013",
+      "version": "1.0.0",
+      "title": "OBL-013 AI Review-Window Obligation",
+      "status": "active",
+      "impactLevel": "rightsImpacting",
+      "actors": [
+        { "id": "supervisoryAgent", "type": "agent", "description": "Supervisory agent producing an assessment" },
+        { "id": "reviewer", "type": "human", "description": "Independent human reviewer" },
+        { "id": "supervisor", "type": "human", "description": "Escalation target" }
+      ],
+      "lifecycle": {
+        "initialState": "open",
+        "states": {
+          "open": {
+            "type": "atomic",
+            "transitions": [
+              { "event": "agentAssessmentEmitted", "target": "open" },
+              { "event": "humanReviewCompleted", "target": "reviewed" }
+            ]
+          },
+          "reviewed": { "type": "final" }
+        }
+      },
+      "caseFile": {
+        "fields": {
+          "assessment": { "type": "string" }
+        }
+      },
+      "governance": {
+        "obligationPolicies": [
+          {
+            "id": "agent-assessment-human-review-required",
+            "description": "An agent's supervisory assessment requires independent human review before it drives a final decision.",
+            "activateWhen": {
+              "on": { "event": "agentAssessmentEmitted" },
+              "actor": { "actorType": "agent" }
+            },
+            "satisfyWhen": {
+              "on": { "event": "humanReviewCompleted" },
+              "actor": { "actorType": "human", "role": "reviewer", "notSameAsTriggerActor": true }
+            },
+            "deadline": { "within": "P1D" },
+            "responsibleRole": "reviewer",
+            "duplicatePolicy": "createEachTime",
+            "onViolation": { "action": "escalate", "escalateTo": "supervisor", "reason": "Independent review of agent assessment not completed within the review window." }
+          }
+        ]
+      },
+      "execution": {
+        "workflowTimeout": "P90D",
+        "defaultTaskTimeout": "P7D",
+        "instanceVersioning": "pinned"
+      }
+    }
+  },
+  "initial_case_state": {},
+  "event_sequence": [
+    { "event": "agentAssessmentEmitted", "actor": "supervisoryAgent" },
+    { "event": "humanReviewCompleted", "actor": "reviewer" }
+  ],
+  "expected_transitions": [
+    { "from": "open", "target": "open", "event": "agentAssessmentEmitted" },
+    { "from": "open", "target": "reviewed", "event": "humanReviewCompleted" }
+  ],
+  "expected_provenance": [
+    {
+      "record_kind": "obligationActivated",
+      "data": {
+        "policyId": "agent-assessment-human-review-required",
+        "obligationId": "agent-assessment-human-review-required#0",
+        "triggerEvent": "agentAssessmentEmitted"
+      }
+    },
+    {
+      "record_kind": "obligationSatisfied",
+      "data": {
+        "policyId": "agent-assessment-human-review-required",
+        "obligationId": "agent-assessment-human-review-required#0",
+        "satisfyingActor": "reviewer"
+      }
+    }
+  ]
+}

@@ -284,6 +284,8 @@ When constraints at different levels conflict, the most restrictive enforcement 
 
 **Guardrail bypass:** An authorized actor with the required role MAY bypass a constraint marked `bypassable: true` with a structured rationale. Bypass applies to a single invocation only and produces a provenance record including the rationale and the bypassed constraint id.
 
+**Durable-obligation independence and bypass (WOS-INTEG-AI-1705 / -1706).** The same separation-of-duties and no-self-bypass guarantees that govern deontic constraints here also govern durable obligation policies, and the obligation contract is normative for both: an agent that *activated* a durable obligation MUST NOT satisfy it when `satisfyWhen.actor.notSameAsTriggerActor` is set (Governance §16.2.5, same-agent independence), and **agents MUST NOT bypass a pending obligation by default** — an agent bypass attempt is rejected and recorded as a violation/tamper provenance record, never as a bypass; only an authorized human/admin actor with a structured rationale may bypass. See [Governance §16.2.5](../governance/workflow-governance.md).
+
 ### 4.8 Examples (non-normative)
 
 **Permission** -- bound agent output to allowed fields and value ranges:

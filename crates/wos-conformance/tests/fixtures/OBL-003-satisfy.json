@@ -1,0 +1,85 @@
+{
+  "_note": "AUTHORED-NOT-RUN (see OBL-001 _note). Role==actor_id: the satisfying actor id 'underwriter' supplies role 'underwriter'; it differs from the trigger actor 'caseworker' so notSameAsTriggerActor is honored. The kernel must declare 'underwriter' as an actor so resolve_actor_kind succeeds.",
+  "id": "WOS-CONF-2303-OBL-003-satisfy",
+  "rule": "WOS-OBL-RUNTIME-0905",
+  "description": "Satisfaction: an underwritingReviewCompleted event by an independent underwriter discharges the pending obligation and emits ObligationSatisfied (ADR 0096 §16.2.3 step 6).",
+  "documents": {
+    "kernel": "inline"
+  },
+  "inline_documents": {
+    "kernel": {
+      "$wosWorkflow": "1.0",
+      "url": "urn:test:OBL-003",
+      "version": "1.0.0",
+      "title": "OBL-003 Obligation Satisfaction",
+      "status": "active",
+      "impactLevel": "rightsImpacting",
+      "actors": [
+        { "id": "caseworker", "type": "human", "description": "Caseworker who edits the case file" },
+        { "id": "underwriter", "type": "human", "description": "Independent underwriter" }
+      ],
+      "lifecycle": {
+        "initialState": "open",
+        "states": {
+          "open": {
+            "type": "atomic",
+            "transitions": [
+              { "event": "caseFileUpdated", "target": "open" },
+              { "event": "underwritingReviewCompleted", "target": "reviewed" }
+            ]
+          },
+          "reviewed": { "type": "final" }
+        }
+      },
+      "caseFile": {
+        "fields": {
+          "income": { "type": "number" }
+        }
+      },
+      "governance": {
+        "obligationPolicies": [
+          {
+            "id": "income-change-review-required",
+            "activateWhen": { "on": { "event": "caseFileUpdated" }, "where": "event.field = 'income'" },
+            "satisfyWhen": {
+              "on": { "event": "underwritingReviewCompleted" },
+              "actor": { "role": "underwriter", "notSameAsTriggerActor": true }
+            },
+            "violateWhen": { "on": { "event": "finalApprovalRequested" } },
+            "responsibleRole": "underwriter",
+            "duplicatePolicy": "ignoreWhilePending",
+            "onViolation": "block"
+          }
+        ]
+      },
+      "execution": {
+        "workflowTimeout": "P90D",
+        "defaultTaskTimeout": "P7D",
+        "instanceVersioning": "pinned"
+      }
+    }
+  },
+  "initial_case_state": {},
+  "event_sequence": [
+    { "event": "caseFileUpdated", "actor": "caseworker", "data": { "field": "income" } },
+    { "event": "underwritingReviewCompleted", "actor": "underwriter" }
+  ],
+  "expected_transitions": [
+    { "from": "open", "target": "open", "event": "caseFileUpdated" },
+    { "from": "open", "target": "reviewed", "event": "underwritingReviewCompleted" }
+  ],
+  "expected_provenance": [
+    {
+      "record_kind": "obligationActivated",
+      "data": { "policyId": "income-change-review-required", "obligationId": "income-change-review-required#0" }
+    },
+    {
+      "record_kind": "obligationSatisfied",
+      "data": {
+        "policyId": "income-change-review-required",
+        "obligationId": "income-change-review-required#0",
+        "satisfyingActor": "underwriter"
+      }
+    }
+  ]
+}

@@ -10,6 +10,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::model::activation::ActivationCriteria;
+
 /// AI integration content — the embedded `aiOversight` block of a $wosWorkflow
 /// document per ADR 0076 D-1. Was a standalone document with `$wosAIIntegration`
 /// marker; the marker now lives on the envelope (`$wosWorkflow`) and this type
@@ -195,6 +197,21 @@ pub struct Capability {
     /// through to the fallback chain.
     #[serde(default)]
     pub preconditions: Vec<String>,
+
+    /// Optional activation criteria evaluated before capability invocation,
+    /// offered additively alongside the FEL-string `preconditions` (ADR 0096;
+    /// WOS-INTEG-AI-1701). Every entry MUST match (event/transition trigger,
+    /// actor constraint, required-data presence, and/or FEL guard) for the
+    /// capability to be invoked; otherwise the processor falls through to the
+    /// fallback chain, exactly like an unmet `preconditions` entry.
+    /// Backward-compatible: empty when absent and the existing
+    /// `preconditions` semantics are unchanged.
+    #[serde(
+        default,
+        rename = "preconditionCriteria",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub precondition_criteria: Vec<ActivationCriteria>,
 }
 
 /// Model version policy (AI Integration S3.4).

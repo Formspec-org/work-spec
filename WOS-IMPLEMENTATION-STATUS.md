@@ -1,6 +1,6 @@
 # WOS Implementation Status & Roadmap
 
-**Last updated:** 2026-04-22
+**Last updated:** 2026-06-08
 **Status:** Certified Reference Implementation (Draft 1)
 
 This document tracks crate maturity, test coverage, and the technical roadmap. For a high-level feature comparison, see `WOS-FEATURE-MATRIX.md`.
@@ -93,6 +93,14 @@ WOS employs a linked-data architecture to ensure interoperability and AI-safety.
 *   [x] **Provenance Export Formats:** `wos-export` crate serializes internal provenance to W3C PROV-O (JSON-LD), IEEE 1849 XES (XML), and OCEL 2.0 (JSON) per Semantic Profile §§5.3–5.6 and §§6.3–6.4; `timestamp` added to `ProvenanceRecord` as export prerequisite; 3 SP-EXPORT-* conformance fixtures green (`sp-export-prov-o`, `sp-export-xes`, `sp-export-ocel`). Known limitations: higher-tier PROV-O bundles (§5.4 Reasoning/Counterfactual/Narrative) not emitted; OCEL case-file-item object tracking linked to instance object only (per-item E2O links future); SHACL validation of PROV-O output out of scope; agent actor-type currently falls back to plain `prov:Agent` pending `ProvenanceRecord` actor-type extension.
 *   [ ] **Simulation Trace Format:** Standardizes formats for replaying simulation runs.
 *   [ ] **Federation Profile:** Enables cross-processor migration and signal routing.
+*   [x] **Shared Activation Criteria + Durable Obligations** (ADR 0096; **landed on branch, PR #4 — compilation and exact conformance traces are CI-gated**): a reusable `ActivationCriteria` shape ("when does this become active?") and durable pending obligations (`ObligationPolicy` → `PendingObligation`, lifecycle `pending → satisfied/violated/cancelled/expired/bypassed`) with deadline timers, violation actions, and provenance. Distinct from DCR constraint zones (zone-local flexible-activity sequencing), task SLAs (`SlaDefinition`), milestones (data-driven checkpoints), the deontic `Obligation` (immediate pre-commit agent-output check), and the policy-engine `Obligation` (per-decision directive). No FEL grammar change (FEL stays the local boolean predicate inside `where`).
+    *   **Spec + schema:** Governance §16 normative contract; `$defs/ActivationCriteria`, `ObligationPolicy`, `ObligationDeadline`, `ObligationViolationAction`, `PolicyObligationHandling`, and `governance.obligationPolicies[]` on `wos-workflow.schema.json`.
+    *   **`wos-core`:** activation/obligation model + deterministic activation evaluator (trigger → actor → requiredData → `where` → deadline, short-circuit, no truthy coercion).
+    *   **`wos-lint`:** `ACT-001..010` registered (Tier 2, all `draft` — unit-test evidence; FEL-backed fixtures land with the OBL-* batch). See `LINT-MATRIX.md`.
+    *   **`wos-events`:** seven obligation `ProvenanceKind` variants (`ObligationActivated/Satisfied/Violated/Cancelled/Expired/Bypassed/Warning`) + witness + PROV-O/XES/OCEL export.
+    *   **`wos-runtime`:** obligation monitor wired into `drain_once` — activation/satisfaction/cancellation, pre-event violate-block, lazy deadline expiry, violation-action effects with strictest-action (`warn < escalate < fail < block`) gating, replay dedupe, count cap, fail-closed posture for `rightsImpacting`/`safetyImpacting`, bypass/extension authorizer.
+    *   **`wos-conformance`:** 13 `OBL-001..013` fixtures (Phase-6 integrations include milestone/SLA/hold criteria, policy-engine materialization, AI bypass/independence).
+    *   **Verification posture:** the standalone WOS checkout **cannot compile Rust** — `fel-core` and the private sibling repos are absent from the sandbox, so `cargo nextest` / `make ci` do not run here. The authoritative gate is the formspec-stack monorepo CI (`.github/workflows/rust-tests.yml`) once the `STACK_REPOS_TOKEN` secret is added; the build step self-skips until then. Conformance fixtures are **authored but not yet executed** in this repository (WOS-GATE-2903 / WOS-GATE-2904). Full fixture↔§16-claim and rule↔check traceability: [`docs/obligation-conformance.md`](docs/obligation-conformance.md). Deferred follow-ups: SLA/Hold `ActivationCriteria` runtime wiring, true business-day deadline expiry (WOS-OBL-TIME-1002 / TIME-1008), DCR per-activity activation gating (WOS-INTEG-DCR-1602), deadline-index performance work (2801).
 
 ### Phase 3: Adoption Artifacts
 *   [ ] Kubernetes and Serverless reference deployment patterns.

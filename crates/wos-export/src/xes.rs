@@ -694,8 +694,15 @@ mod tests {
             ProvenanceKind::CommitAttemptFailure,
             ProvenanceKind::AuthorizationRejected,
             ProvenanceKind::MigrationPinChanged,
+            ProvenanceKind::ObligationActivated,
+            ProvenanceKind::ObligationSatisfied,
+            ProvenanceKind::ObligationViolated,
+            ProvenanceKind::ObligationCancelled,
+            ProvenanceKind::ObligationExpired,
+            ProvenanceKind::ObligationBypassed,
+            ProvenanceKind::ObligationWarning,
         ];
-        assert_eq!(all.len(), 115);
+        assert_eq!(all.len(), 122);
 
         let mut log = ProvenanceLog::default();
         for kind in all {
@@ -717,6 +724,26 @@ mod tests {
                 "{kind:?} expected XES concept:name={expected:?} not found in export"
             );
         }
+    }
+
+    #[test]
+    fn exports_obligation_violated_event_with_stable_concept_name() {
+        // WOS-OBL-EXPORT-1202: obligation lifecycle records map through the
+        // generic §6.3 event mapping. XES does not project `data`
+        // (policyId/obligationId live there — surfaced in OCEL instead), so the
+        // stable contract here is the `concept:name` lifecycle label.
+        let mut log = ProvenanceLog::default();
+        let mut record = stamped_transition(Some("caseworker-7"));
+        record.record_kind = ProvenanceKind::ObligationViolated;
+        log.push(record);
+
+        let xml = export(&log, &config());
+
+        assert_eq!(count_elements(&xml, "event"), 1);
+        assert!(
+            xml.contains(r#"<string key="concept:name" value="obligationViolated"/>"#),
+            "obligation event must carry stable concept:name: {xml}"
+        );
     }
 
     #[test]

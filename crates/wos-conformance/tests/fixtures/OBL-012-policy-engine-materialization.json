@@ -1,0 +1,115 @@
+{
+  "_note": "AUTHORED-NOT-RUN (see OBL-001 _note). POLICY-ENGINE BRIDGE (WOS-INTEG-POLICY-1801/1802): mirrors INT-POLICY-001's shape (kernel invokeService -> integration sidecar binding). The binding adds obligationHandling:{mode:materialize,templateRef:...}; serde flatten puts engineType+obligationHandling at the binding's top level (integration.rs IntegrationBinding.extensions is #[serde(flatten)]). With a non-indeterminate decision carrying a non-empty obligations array, materialize_policy_obligations (policy_engine.rs) creates one PendingObligation per directive with policyId 'policyEngineDirective:<directiveId>', obligationId '...#0', trigger_event None, and emits ObligationActivated carrying that id. PolicyDecision provenance is also emitted (decision='deny'). Confirm: directive id mapping and that 'deny' decisions still materialize obligations (indeterminate never does).",
+  "id": "WOS-CONF-2312-OBL-012-policy-engine-materialization",
+  "rule": "WOS-INTEG-POLICY-1801",
+  "description": "Policy-engine materialization: a policy-engine binding with obligationHandling:materialize turns each returned obligation directive into a durable PendingObligation and emits ObligationActivated (ADR 0096; WOS-INTEG-POLICY-1801/1802).",
+  "documents": {
+    "kernel": "inline",
+    "integration": "inline"
+  },
+  "inline_documents": {
+    "kernel": {
+      "$wosWorkflow": "1.0",
+      "url": "urn:test:OBL-012",
+      "version": "1.0.0",
+      "title": "OBL-012 Policy-Engine Obligation Materialization",
+      "status": "active",
+      "impactLevel": "rightsImpacting",
+      "actors": [
+        { "id": "operator", "type": "human", "description": "Workflow operator" }
+      ],
+      "lifecycle": {
+        "initialState": "open",
+        "states": {
+          "open": {
+            "type": "atomic",
+            "transitions": [
+              {
+                "event": "evaluate",
+                "target": "evaluated",
+                "actions": [
+                  { "action": "invokeService", "serviceRef": "policyEngine" }
+                ]
+              }
+            ]
+          },
+          "evaluated": { "type": "final" }
+        }
+      },
+      "caseFile": {
+        "fields": {
+          "policyDecision": { "type": "string" }
+        }
+      },
+      "execution": {
+        "workflowTimeout": "P90D",
+        "defaultTaskTimeout": "P7D",
+        "instanceVersioning": "pinned"
+      }
+    },
+    "integration": {
+      "$wosWorkflow": "1.0",
+      "url": "https://example.test/obl-012-integration",
+      "version": "1.0.0",
+      "title": "OBL-012 Integration Sidecar",
+      "impactLevel": "rightsImpacting",
+      "actors": [
+        { "id": "system", "type": "system" }
+      ],
+      "lifecycle": {
+        "initialState": "start",
+        "states": {
+          "start": { "type": "atomic", "transitions": [ { "target": "done" } ] },
+          "done": { "type": "final" }
+        }
+      },
+      "bindings": {
+        "targetWorkflow": {
+          "url": "urn:test:OBL-012",
+          "compatibleVersions": ">=1.0.0 <2.0.0"
+        },
+        "bindings": {
+          "policyEngine": {
+            "type": "policy-engine",
+            "description": "Policy engine evaluation that returns obligation directives",
+            "engineType": "canonical",
+            "obligationHandling": {
+              "mode": "materialize",
+              "templateRef": "urn:wos:obligation-template:policy-engine-directive"
+            },
+            "outputBinding": {
+              "caseFile.policyDecision": "$.decision"
+            }
+          }
+        }
+      }
+    }
+  },
+  "service_response": {
+    "decision": "deny",
+    "reasons": ["income exceeds threshold"],
+    "obligations": [
+      { "id": "notify-applicant", "data": { "channel": "mail" } }
+    ]
+  },
+  "initial_case_state": {},
+  "event_sequence": [
+    { "event": "evaluate", "actor": "operator" }
+  ],
+  "expected_transitions": [
+    { "from": "open", "target": "evaluated", "event": "evaluate" }
+  ],
+  "expected_provenance": [
+    {
+      "record_kind": "policyDecision",
+      "data": { "serviceRef": "policyEngine", "engineType": "canonical", "decision": "deny" }
+    },
+    {
+      "record_kind": "obligationActivated",
+      "data": {
+        "policyId": "policyEngineDirective:notify-applicant",
+        "obligationId": "policyEngineDirective:notify-applicant#0"
+      }
+    }
+  ]
+}

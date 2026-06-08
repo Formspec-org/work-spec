@@ -111,7 +111,7 @@ States, transitions, guards, case data, actors, relationships. Every transition 
 
 ### Layer 1 — Governance (optional)
 
-Due process for adverse decisions, five structured review protocols (independent-first, consider-opposite, calibrated confidence, dual-blind, unassisted), validation pipelines, delegation of authority with legal instrument references, hold policies, and authority-ranked reasoning traces. This layer is where most of the genuine invention lives.
+Due process for adverse decisions, five structured review protocols (independent-first, consider-opposite, calibrated confidence, dual-blind, unassisted), validation pipelines, delegation of authority with legal instrument references, hold policies, authority-ranked reasoning traces, and **durable obligation policies with shared activation criteria** — declarative "after X, Y must happen by T (by actor/role R), else action A" duties with a pending → satisfied/violated/cancelled/expired/bypassed lifecycle (ADR 0096; see the [authoring guide](docs/activation-and-obligations.md)). This layer is where most of the genuine invention lives.
 
 ### Layer 2 — AI Integration (optional)
 
@@ -273,6 +273,8 @@ WOS did not invent lifecycle modeling. It combines proven concepts with novel go
 WOS is maintained by Michael Deeb as part of Formspec under Apache-2.0 / BSL 1.1. The specification is **pre-release**; there are no production deployments yet.
 
 **Shipped:** 18 specs, 18 schemas, 41 workflow samples, 146 dynamic conformance scenarios (all green), 197 lint constraints (all with test witnesses), five Rust crates, the Runtime S15 coprocessor protocol, and seven completed code-review rounds.
+
+**Durable obligation policies + activation criteria (ADR 0096):** spec ([Governance §16](specs/governance/workflow-governance.md)), schema (`$defs/ObligationPolicy`, `$defs/ActivationCriteria` in `wos-workflow.schema.json`), and the reference-runtime spine (typed models in `wos-core`, authoring helpers in `wos-authoring`) are implemented; engine-adapter integrations and the full conformance suite are in progress. See the [authoring guide](docs/activation-and-obligations.md) and [worked examples](docs/obligation-examples.md).
 
 **Not shipped:** Production deployments, engine-specific bindings (Camunda, Temporal, Step Functions), runtime processors for the Integration Profile sidecars, WCAG/FedRAMP/NIST audits, a formal governance body beyond the maintainer.
 

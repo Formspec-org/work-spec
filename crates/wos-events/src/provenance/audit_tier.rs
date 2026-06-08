@@ -173,7 +173,14 @@ impl From<K> for ProvenanceAuditTier {
             | K::ClockSkewObserved
             | K::CommitAttemptFailure
             | K::AuthorizationRejected
-            | K::MigrationPinChanged => Self::Facts,
+            | K::MigrationPinChanged
+            | K::ObligationActivated
+            | K::ObligationSatisfied
+            | K::ObligationViolated
+            | K::ObligationCancelled
+            | K::ObligationExpired
+            | K::ObligationBypassed
+            | K::ObligationWarning => Self::Facts,
         }
     }
 }

@@ -1,0 +1,129 @@
+name: WOS Rust tests (cross-repo)
+
+# ---------------------------------------------------------------------------
+# Why this workflow exists
+#
+# The WOS Rust crates do NOT build standalone. The workspace path-depends on
+# sibling sources (see Cargo.toml [workspace.dependencies] and crates/*/Cargo.toml):
+#
+#   ../fel-core                         -> Formspec-Labs/fel-core         (public)
+#   ../stack-common/...                 -> Formspec-Labs/stack-common     (private)
+#   ../integrity-stack/...              -> Formspec-Labs/integrity-stack  (private)
+#   ../workspec-server/...              -> Formspec-Labs/workspec-server   (private)
+#   ../trellis/crates/{trellis-types,trellis-service-client}
+#                                       -> NO standalone repo; lives only inside
+#                                          the private Formspec-Labs/formspec-stack
+#                                          monorepo.
+#
+# The supported topology is the formspec-stack monorepo, which carries every
+# sibling (work-spec, fel-core, stack-common, trellis, integrity-stack,
+# workspec-server, ...) at the relative paths the Cargo manifests expect. This
+# job reconstructs that topology in CI:
+#   1. check out formspec-stack with submodules,
+#   2. overlay THIS PR's tree onto its work-spec/ directory,
+#   3. run cargo from formspec-stack/work-spec so ../fel-core etc. resolve.
+#
+# PREREQUISITE (one-time, repo admin): add a repository/org secret
+#   STACK_REPOS_TOKEN
+# = a PAT or GitHub App installation token with read access to the private
+# Formspec-Labs repos AND their submodules. The default GITHUB_TOKEN only
+# reads this repo, so it cannot fetch the private siblings.
+#
+# Until that secret exists, the build job is SKIPPED — this workflow never adds
+# red CI noise on its own. With the secret present it compiles + runs the
+# obligation-relevant crates (and is trivially widened to --workspace).
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_dispatch: {}
+  pull_request:
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/rust-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  # Secrets cannot be referenced directly in job/step `if:` conditions, so we
+  # surface presence via an output computed from an env-bound secret.
+  detect-token:
+    name: detect cross-repo token
+    runs-on: ubuntu-latest
+    outputs:
+      has_token: ${{ steps.check.outputs.has_token }}
+    steps:
+      - id: check
+        env:
+          TOKEN: ${{ secrets.STACK_REPOS_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Rust build skipped::STACK_REPOS_TOKEN secret is not set. Add an org-read PAT/App token to enable cross-repo cargo builds (see workflow header)."
+          fi
+
+  rust-tests:
+    name: cargo nextest (cross-repo topology)
+    needs: detect-token
+    if: needs.detect-token.outputs.has_token == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out formspec-stack monorepo (assembles sibling topology)
+        uses: actions/checkout@v4
+        with:
+          repository: Formspec-Labs/formspec-stack
+          ref: main
+          token: ${{ secrets.STACK_REPOS_TOKEN }}
+          submodules: recursive
+          path: stack
+
+      - name: Check out this PR's tree
+        uses: actions/checkout@v4
+        with:
+          path: pr
+
+      - name: Overlay PR tree onto monorepo work-spec/ (test PR code, monorepo siblings)
+        run: |
+          set -euo pipefail
+          # work-spec/ is the workspec submodule inside formspec-stack. Replace
+          # its content with this PR's tree, preserving the submodule .git so the
+          # checkout stays valid. The sibling submodules (fel-core, stack-common,
+          # trellis, integrity-stack, workspec-server) keep their monorepo-pinned
+          # versions.
+          if [ ! -d stack/work-spec ]; then
+            echo "::error::stack/work-spec not found — formspec-stack layout changed; update this workflow." >&2
+            ls -la stack
+            exit 1
+          fi
+          rsync -a --delete \
+            --exclude='.git' \
+            --exclude='target/' \
+            pr/ stack/work-spec/
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            stack/work-spec/target
+          key: ${{ runner.os }}-stack-cargo-${{ hashFiles('pr/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-stack-cargo-
+
+      - name: cargo build (obligation crates)
+        working-directory: stack/work-spec
+        run: cargo build -p wos-core -p wos-events -p wos-lint -p wos-runtime
+
+      - name: cargo nextest (obligation crates)
+        working-directory: stack/work-spec
+        run: cargo nextest run -p wos-core -p wos-events -p wos-lint -p wos-runtime

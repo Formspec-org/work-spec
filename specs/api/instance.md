@@ -72,6 +72,23 @@ The aggregated response shape is `WorkflowProcessWithIncludes`: a required `inst
 - `activeEscalation?: { level, escalatedTo, escalatedAt, reason }` — current escalation posture. Present only when an escalation chain is actively walking; absent otherwise. `level` (integer >= 1) is the current 1-based escalation level; `escalatedTo` carries the `ActorRef` URN the case was reassigned to; `escalatedAt` is the RFC 3339 UTC timestamp; `reason` carries the `EscalationReason` cause cross-`$ref`d from `governance.schema.json`.
 - `activeHoldsCount?: integer (>= 0)` — count of currently active holds. The holds subresource carries the per-hold detail (governance S12).
 - `activeGovernanceRules?: [ { ruleId, ruleKind, triggerTag?, activatedAt } ]` — governance rules currently active on this instance's state configuration. `ruleKind` is the closed taxonomy `lifecycle-hook | contract-hook | review-protocol | due-process-notice | assertion-gate`. `triggerTag` is an optional identifier for the originating trigger; `activatedAt` is the RFC 3339 timestamp when the rule became active.
+- `pendingObligations?: PendingObligation[]` — durable obligations currently outstanding on this instance (WOS-API-2201, ADR 0096 D-2/D-5). Backward compatible: optional and default-absent on instances that declare no obligation policies. Projects the runtime `WorkflowProcess.governanceState.pendingObligations[]` state (Rust `wos_core::instance::GovernanceState.pending_obligations`); ordered by `activatedAt` ascending.
+
+## Durable obligations
+
+A durable obligation (ADR 0096) is a future-tense, cross-event duty: "after X happens, Y must happen before Z or within T, by actor/role R, otherwise apply action A." The author-time policy is `ObligationPolicy` at `wos-workflow.schema.json#/$defs/ObligationPolicy`; this API surface projects the runtime obligation state and exposes governance commands over it.
+
+`PendingObligation` (WOS-API-2201) is the read-only runtime projection of a single tracked obligation, mirroring kernel `wos_core::instance::PendingObligation`. Fields: `obligationId` (runtime instance id, unique within the process), `policyId` (originating `ObligationPolicy.id`), closed `status` (`pending | satisfied | violated | cancelled | expired | bypassed`), optional `triggerEvent` and `triggerActorId` (the latter load-bearing for `satisfyWhen` separation-of-duties checks), `activatedAt`, optional `deadline` (computed `activatedAt + ObligationDeadline.within`), optional `responsibleActor`/`responsibleRole`, optional `correlationKey`, and the `x-`-keyed `extensions` vendor bag. It appears as the array element of `WorkflowProcessGovernance.pendingObligations`.
+
+### Obligation-status projection
+
+`ObligationStatusList` (WOS-API-2202) is the obligation-status query response for a workflow process: `{ processId, items: ObligationStatusItem[] }`, not cursor-paginated because the set is small and bounded. Each `ObligationStatusItem` wraps the full `obligation: PendingObligation` plus list-level `policyId`, `status`, optional `deadline`, and an `explanation` — a human-readable statement of why the obligation holds its current status (policy duty, breach/satisfaction cause, or bypass rationale). `ObligationStatusQuery` is the reserved query-parameter set: `status[]`, `responsibleActor`, `responsibleRole`, `deadlineBefore`, `deadlineAfter`. Filters compose with AND semantics; an empty `status[]` is rejected with `WOS-1422` and a missing filter spans every value. Obligations without a deadline are excluded when either deadline-window filter is present. Items are ordered by `deadline` ascending.
+
+### Obligation commands
+
+`ObligationBypassCommand` (WOS-API-2203) records that a `pending` obligation is intentionally not satisfied: `{ obligationId, actorRef, rationale }`. The runtime sets `status` to `bypassed` and emits a Facts-tier provenance record carrying the actor and rationale; bypassing a terminal obligation is rejected with `WOS-1409`. `actorRef` and `rationale` are REQUIRED so the bypass is never silent.
+
+`ObligationDeadlineExtensionCommand` (WOS-API-2203) pushes a `pending` obligation's deadline out: `{ obligationId, actorRef, rationale }` plus exactly one of `newDeadline` (absolute RFC 3339 instant) or `newWithin` (relative ISO 8601 duration with the `P<N>BD` business-day extension, mirroring `ObligationDeadline.within`). The `oneOf` makes supplying both, or neither, structurally inexpressible. `newDeadline` earlier than the current deadline is rejected with `WOS-1422`; extending a terminal obligation is rejected with `WOS-1409`. The runtime reschedules the deadline timer and emits a Facts-tier provenance record.
 
 ## DCR constraint zone state
 

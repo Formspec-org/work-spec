@@ -1,0 +1,73 @@
+{
+  "_note": "AUTHORED-NOT-RUN (see OBL-001 _note). NEGATIVE CASE: the where-guard is false (event.field='address' != 'income') so NO ObligationActivated must be emitted and pending_obligations stays empty. The expected_provenance partial-match harness can only assert presence, not absence, so this fixture asserts only the ordinary transition; the absence-of-activation assertion needs a dedicated harness test (count obligationActivated == 0) once CI can run, mirroring obligations.rs::activation_does_not_fire_when_fel_false.",
+  "id": "WOS-CONF-2302-OBL-002-no-activation-when-where-false",
+  "rule": "WOS-OBL-RUNTIME-0903",
+  "description": "No activation: a caseFileUpdated event whose where-guard is false (field='address') does NOT create a pending obligation (ADR 0096 §16.2.3).",
+  "documents": {
+    "kernel": "inline"
+  },
+  "inline_documents": {
+    "kernel": {
+      "$wosWorkflow": "1.0",
+      "url": "urn:test:OBL-002",
+      "version": "1.0.0",
+      "title": "OBL-002 No Activation When Guard False",
+      "status": "active",
+      "impactLevel": "rightsImpacting",
+      "actors": [
+        { "id": "caseworker", "type": "human", "description": "Caseworker who edits the case file" },
+        { "id": "underwriter", "type": "human", "description": "Independent underwriter" }
+      ],
+      "lifecycle": {
+        "initialState": "open",
+        "states": {
+          "open": {
+            "type": "atomic",
+            "transitions": [
+              { "event": "caseFileUpdated", "target": "open" }
+            ]
+          }
+        }
+      },
+      "caseFile": {
+        "fields": {
+          "income": { "type": "number" },
+          "address": { "type": "string" }
+        }
+      },
+      "governance": {
+        "obligationPolicies": [
+          {
+            "id": "income-change-review-required",
+            "activateWhen": { "on": { "event": "caseFileUpdated" }, "where": "event.field = 'income'" },
+            "satisfyWhen": {
+              "on": { "event": "underwritingReviewCompleted" },
+              "actor": { "role": "underwriter", "notSameAsTriggerActor": true }
+            },
+            "violateWhen": { "on": { "event": "finalApprovalRequested" } },
+            "responsibleRole": "underwriter",
+            "duplicatePolicy": "ignoreWhilePending",
+            "onViolation": "block"
+          }
+        ]
+      },
+      "execution": {
+        "workflowTimeout": "P90D",
+        "defaultTaskTimeout": "P7D",
+        "instanceVersioning": "pinned"
+      }
+    }
+  },
+  "initial_case_state": {},
+  "event_sequence": [
+    {
+      "event": "caseFileUpdated",
+      "actor": "caseworker",
+      "data": { "field": "address" }
+    }
+  ],
+  "expected_transitions": [
+    { "from": "open", "target": "open", "event": "caseFileUpdated" }
+  ],
+  "expected_provenance": []
+}

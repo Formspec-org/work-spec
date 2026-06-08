@@ -12,7 +12,7 @@ For the scope of each stream and the tag convention, see
 
 | Kernel | Governance | AI    | Advanced | Notes |
 |--------|------------|-------|----------|-------|
-| 1.0.x  | 1.0.x      | 0.5.x | 0.1.x    | Current. Treat as the sole supported combination until a second row lands. |
+| 1.0.x  | 1.0.x      | 0.5.x | 0.1.x    | Current. Treat as the sole supported combination until a second row lands. The activation-criteria + durable-obligation block ([ADR 0096](thoughts/adr/0096-shared-activation-criteria-and-durable-obligations.md)) composes within this row: it lands inside `governance` and adds no new stream or envelope marker, so it claims under the existing `wos-governance@1.0` cell (`$wosWorkflow@1.0 [governance(obligations)]`). See the [claims map](RELEASE-STREAMS.md#claims-map-post-adr-0076). |
 
 ## How to read a row
 

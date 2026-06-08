@@ -111,7 +111,7 @@
   },
   "registryVersion": "1.2.0",
   "lastAudited": "2026-05-13",
-  "totalCount": 134,
+  "totalCount": 141,
   "schemaValidatedCount": 23,
   "admissionContract": {
     "source": "ProvenanceKind::canonical_event_literal()",
@@ -1102,6 +1102,55 @@
       "schemaValidated": true,
       "eventLiteral": "wos.kernel.migration_pin_changed",
       "specReference": "ADR 0071 §3"
+    },
+    {
+      "literal": "obligationActivated",
+      "rustVariant": "ObligationActivated",
+      "category": "governance",
+      "schemaValidated": false,
+      "specReference": "ADR 0096; Governance §16.2"
+    },
+    {
+      "literal": "obligationSatisfied",
+      "rustVariant": "ObligationSatisfied",
+      "category": "governance",
+      "schemaValidated": false,
+      "specReference": "ADR 0096; Governance §16.2"
+    },
+    {
+      "literal": "obligationViolated",
+      "rustVariant": "ObligationViolated",
+      "category": "governance",
+      "schemaValidated": false,
+      "specReference": "ADR 0096; Governance §16.2.4"
+    },
+    {
+      "literal": "obligationCancelled",
+      "rustVariant": "ObligationCancelled",
+      "category": "governance",
+      "schemaValidated": false,
+      "specReference": "ADR 0096; Governance §16.2"
+    },
+    {
+      "literal": "obligationExpired",
+      "rustVariant": "ObligationExpired",
+      "category": "governance",
+      "schemaValidated": false,
+      "specReference": "ADR 0096; Governance §16.2"
+    },
+    {
+      "literal": "obligationBypassed",
+      "rustVariant": "ObligationBypassed",
+      "category": "governance",
+      "schemaValidated": false,
+      "specReference": "ADR 0096; Governance §16.2.5"
+    },
+    {
+      "literal": "obligationWarning",
+      "rustVariant": "ObligationWarning",
+      "category": "governance",
+      "schemaValidated": false,
+      "specReference": "ADR 0096; Governance §16.2"
     }
   ]
 }

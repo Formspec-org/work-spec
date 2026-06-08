@@ -2310,6 +2310,45 @@
             }
           ]
         },
+        "obligationPolicies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ObligationPolicy"
+          },
+          "description": "Durable pending-obligation policies (ADR 0096): WOS-native, cross-event workflow duties of the form \"after X, Y must happen by T by role R, else action A.\" Each policy's clauses are ActivationCriteria; the runtime materializes a `PendingObligation` on `activateWhen` and drives its lifecycle. This is the author-time home for the feature; it is additive and WOS-native, NOT Signal/Linear Temporal Logic — FEL gains no temporal operators (ADR 0096 D-1). Distinct from `agents[].deontic.obligations` (immediate pre-commit checks) and policy-engine decision obligations.",
+          "examples": [
+            [
+              {
+                "id": "income-change-review-required",
+                "activateWhen": {
+                  "on": {
+                    "event": "caseFileUpdated"
+                  },
+                  "where": "event.field = 'income'"
+                },
+                "satisfyWhen": {
+                  "on": {
+                    "event": "underwritingReviewCompleted"
+                  }
+                },
+                "violateWhen": {
+                  "on": {
+                    "event": "finalApprovalRequested"
+                  }
+                },
+                "deadline": {
+                  "within": "P2D"
+                },
+                "responsibleRole": "underwriter",
+                "onViolation": "block"
+              }
+            ]
+          ],
+          "x-lm": {
+            "critical": true,
+            "intent": "Author-time home for durable obligation policies. Required for rights/safety workflows that gate an action on a prior duty. Reuses ActivationCriteria; never STL."
+          }
+        },
         "policyParameters": {
           "type": "object",
           "$comment": "Temporal parameters, deadline config, business calendar refs.",
@@ -8899,6 +8938,775 @@
         }
       }
     },
+    "ActivationTrigger": {
+      "type": "object",
+      "description": "Event- or transition-shaped trigger half of an ActivationCriteria (ADR 0096 D-4). At least one property MUST be present. A trigger matches when the runtime event (or the firing transition) satisfies every declared field. `event` is an exact kernel event name; `eventTag` / `transitionTag` match a declared semantic tag; `eventKind` narrows by message/signal/timer/error/condition family.",
+      "patternProperties": {
+        "^x-": {
+          "$comment": "Vendor extensions per Kernel spec §10.6"
+        }
+      },
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "event": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_-]*$",
+          "description": "Exact kernel event name that triggers activation. MUST match the kernel event-name grammar `^[a-zA-Z][a-zA-Z0-9_-]*$` (rejects empty strings, whitespace, and `$`-prefixed kernel-reserved names). Event-name resolution against the target kernel is checked by lint ACT-003.",
+          "examples": [
+            "caseFileUpdated",
+            "incomeChanged",
+            "reviewCompleted"
+          ],
+          "x-wos": {
+            "openStringKind": "identifier"
+          }
+        },
+        "eventTag": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Semantic event tag that triggers activation when any matching event carries the tag. Use when several concrete event names share a governance meaning.",
+          "examples": [
+            "adverseDecisionPrepared",
+            "determinationReady"
+          ],
+          "x-wos": {
+            "openStringKind": "tagLabel"
+          }
+        },
+        "eventKind": {
+          "type": "string",
+          "enum": [
+            "message",
+            "signal",
+            "timer",
+            "error",
+            "condition"
+          ],
+          "description": "Narrows the trigger to a kernel event family (BPMN-derived taxonomy). Optional refinement on top of `event`/`eventTag`.",
+          "examples": [
+            "message",
+            "timer"
+          ]
+        },
+        "transitionTag": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Transition semantic tag. Matches when a lifecycle transition carrying this tag fires, rather than on a raw event.",
+          "examples": [
+            "finalApproval",
+            "release"
+          ],
+          "x-wos": {
+            "openStringKind": "tagLabel"
+          }
+        },
+        "eventScope": {
+          "type": "string",
+          "enum": [
+            "this",
+            "related"
+          ],
+          "default": "this",
+          "description": "Scopes which case's events this trigger matches (ADR 0096; WOS-INTEG-REL-2101). `this` (default) matches only events on the case the criteria is evaluated for. `related` widens matching to events surfaced from a related case (e.g. `$related.*` events bridged in by a `pending-related-case` hold or a cross-case linkage), so a duty can be activated or discharged by something that happens on a linked case. Backward-compatible: absent means `this`, the historical behavior. Cross-case event resolution against declared case relationships is checked by lint ACT-008.",
+          "examples": [
+            "this",
+            "related"
+          ]
+        }
+      }
+    },
+    "ActorConstraint": {
+      "type": "object",
+      "description": "Actor half of an ActivationCriteria. Constrains which actor's event satisfies the criteria. `notSameAsTriggerActor` is load-bearing for separation-of-duties: in an obligation-satisfaction context it prevents the actor who triggered the duty from also discharging it (e.g. an agent verifying its own output; ADR 0096, WOS-INTEG-AI-1705).",
+      "patternProperties": {
+        "^x-": {
+          "$comment": "Vendor extensions per Kernel spec §10.6"
+        }
+      },
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "actorId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Exact actor identifier that MUST match for the criteria to hold.",
+          "examples": [
+            "underwriter-1"
+          ],
+          "x-wos": {
+            "openStringKind": "identifier"
+          }
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Actor role the matching actor MUST hold. Resolved against the kernel actor registry, same rules as Delegation and task assignment (Governance §11, §10.2).",
+          "examples": [
+            "caseworker",
+            "underwriter",
+            "independentReviewer"
+          ],
+          "x-wos": {
+            "openStringKind": "identifier"
+          }
+        },
+        "actorType": {
+          "type": "string",
+          "enum": [
+            "human",
+            "system",
+            "agent"
+          ],
+          "description": "Actor kind the matching actor MUST be, per kernel `ActorKind` (ADR 0064).",
+          "examples": [
+            "human",
+            "agent"
+          ]
+        },
+        "notSameAsTriggerActor": {
+          "type": "boolean",
+          "description": "When true, the matching actor MUST differ from the actor that activated the obligation. Meaningful only in a satisfaction/violation context where a triggering actor was recorded; ignored on `activateWhen`. Enforces same-actor independence (separation of duties).",
+          "examples": [
+            true
+          ]
+        }
+      }
+    },
+    "RequiredDataPath": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Dotted path into a canonical WOS namespace (`caseFile`, `event`, `context`, `actor`) that MUST be present and non-null for activation. Evaluated by a simple path resolver, not full FEL: null fails, missing fails, present-non-null passes (WOS-ACT-0403). Path resolution against declared case-file fields is checked by lint ACT-004.",
+      "examples": [
+        "caseFile.income",
+        "event.field",
+        "caseFile.applicant.householdSize"
+      ],
+      "x-wos": {
+        "openStringKind": "identifier"
+      }
+    },
+    "ActivationCriteria": {
+      "type": "object",
+      "description": "Reusable \"when does this become active?\" predicate (ADR 0096 D-4). Composes an optional trigger (`on`), actor constraint (`actor`), required-data presence paths (`requiredData`), an FEL boolean guard (`where`), and an optional deadline window (`within` + `calendarRef`). Evaluated deterministically in this order: trigger → actor → requiredData → `where` → deadline hint; any declared clause that fails yields no activation (WOS-ACT-0201). `where` is a local boolean FEL predicate — FEL gains no temporal operators (ADR 0096 D-1); a non-boolean result fails activation rather than being coerced by truthiness. At least one property MUST be present. Activation alone does not mutate state; consuming surfaces (ObligationPolicy, milestones, SLAs, holds, DCR activities, agent preconditions) decide the effect.",
+      "patternProperties": {
+        "^x-": {
+          "$comment": "Vendor extensions per Kernel spec §10.6"
+        }
+      },
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional stable identifier for trace and reference. Surfaced in activation-evaluation traces (WOS-ACT-0202); becomes a library key only when targeted by an `activationCriteriaRef` (WOS-ACT-0203).",
+          "examples": [
+            "commonIncomeChange"
+          ],
+          "x-wos": {
+            "openStringKind": "identifier"
+          }
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable description of when this criteria becomes active.",
+          "examples": [
+            "Reported income changed after submission."
+          ],
+          "x-wos": {
+            "openStringKind": "prose"
+          }
+        },
+        "on": {
+          "$ref": "#/$defs/ActivationTrigger",
+          "description": "Event/transition trigger. When present, an event or firing transition MUST match before the other clauses are evaluated."
+        },
+        "where": {
+          "type": "string",
+          "minLength": 1,
+          "description": "FEL boolean guard evaluated against the canonical activation namespaces (`caseFile`, `event`, `actor`, `context`). MUST evaluate to boolean true to activate; a non-boolean or error result fails activation (lint ACT-001 syntax, ACT-002 boolean shape). FEL is the only expression language and carries no temporal operators (ADR 0096 D-1).",
+          "examples": [
+            "event.field = 'income'",
+            "caseFile.income > caseFile.priorIncome",
+            "actor.type = 'agent' and caseFile.confidence < 0.8"
+          ],
+          "x-wos": {
+            "openStringKind": "fel"
+          }
+        },
+        "actor": {
+          "$ref": "#/$defs/ActorConstraint",
+          "description": "Actor constraint that the triggering (or satisfying) actor MUST satisfy."
+        },
+        "requiredData": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/RequiredDataPath"
+          },
+          "description": "Paths that MUST be present and non-null for activation. Evaluated by a presence resolver, not FEL.",
+          "examples": [
+            [
+              "caseFile.income"
+            ],
+            [
+              "caseFile.income",
+              "caseFile.priorIncome"
+            ]
+          ]
+        },
+        "within": {
+          "type": "string",
+          "pattern": "^P(?:\\d+BD|(?!$)(?:\\d+Y)?(?:\\d+M)?(?:\\d+W)?(?:\\d+D)?(?:T(?=\\d)(?:\\d+H)?(?:\\d+M)?(?:\\d+S)?)?)$",
+          "description": "Optional deadline window the consuming surface computes from the activation timestamp. MUST be an ISO 8601 duration; the WOS `P<N>BD` extension denotes N business days resolved against `calendarRef`. The criteria evaluator returns this as a deadline hint only — it does not schedule timers itself (WOS-ACT-0405). Validated by lint ACT-005.",
+          "examples": [
+            "P2D",
+            "PT4H",
+            "P5BD"
+          ]
+        },
+        "calendarRef": {
+          "type": "string",
+          "format": "uri",
+          "minLength": 1,
+          "description": "URI of the Business Calendar sidecar used to resolve `P<N>BD` business-day arithmetic in `within`. Same ref convention as `SlaDefinition.calendarRef`. Lint ACT-006 warns when a business-day `within` is used without a resolvable `calendarRef`.",
+          "examples": [
+            "urn:wos:calendar:federal-fy2026",
+            "https://agency.gov/sidecars/business-calendar-fy2026"
+          ],
+          "x-wos": {
+            "openStringKind": "uri"
+          }
+        }
+      },
+      "examples": [
+        {
+          "on": {
+            "event": "incomeChanged"
+          }
+        },
+        {
+          "on": {
+            "event": "caseFileUpdated"
+          },
+          "where": "event.field = 'income'"
+        },
+        {
+          "actor": {
+            "role": "caseworker"
+          },
+          "within": "P2D",
+          "calendarRef": "urn:wos:calendar:federal-fy2026"
+        },
+        {
+          "on": {
+            "eventTag": "determinationReady"
+          },
+          "requiredData": [
+            "caseFile.income"
+          ]
+        },
+        {
+          "actor": {
+            "role": "independentReviewer",
+            "notSameAsTriggerActor": true
+          },
+          "on": {
+            "event": "reviewCompleted"
+          }
+        }
+      ],
+      "x-lm": {
+        "critical": true,
+        "intent": "Shared activation predicate. Use `on` for the event/transition trigger, `where` for an FEL boolean refinement (never temporal logic), `actor` for who, `requiredData` for presence gates, `within`+`calendarRef` for a deadline window. Reused by obligation policies and, optionally, milestones/SLAs/holds/DCR/agent preconditions."
+      }
+    },
+    "ActivationCriteriaRef": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(#/.+|[a-zA-Z][a-zA-Z0-9+.-]*:.+)$",
+      "description": "JSON-Pointer fragment or URI reference to a named ActivationCriteria, resolved at load/lint time, not lazily at runtime (ADR 0096; WOS-ACT-0102/0203). Mutually exclusive with an inline criteria at any consuming site; unresolved references are a lint/runtime rejection (ACT-007), never silently ignored.",
+      "examples": [
+        "#/$defs/commonIncomeChange",
+        "urn:wos:activation:income-change"
+      ],
+      "x-wos": {
+        "openStringKind": "uri"
+      }
+    },
+    "ObligationWarningThreshold": {
+      "type": "object",
+      "required": [
+        "beforeBreach",
+        "notify"
+      ],
+      "patternProperties": {
+        "^x-": {
+          "$comment": "Vendor extensions per Kernel spec §10.6"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Pre-breach warning for an obligation deadline. Fires a warning a lead-time before the deadline elapses; emits ObligationWarning provenance and does not change obligation status (WOS-OBL-TIME-1007). Lighter than `WarningThreshold` (no required `templateKey`), because an obligation warning may notify actors without rendering a notification-sidecar template.",
+      "properties": {
+        "beforeBreach": {
+          "type": "string",
+          "pattern": "^P(?:\\d+BD|(?!$)(?:\\d+Y)?(?:\\d+M)?(?:\\d+W)?(?:\\d+D)?(?:T(?=\\d)(?:\\d+H)?(?:\\d+M)?(?:\\d+S)?)?)$",
+          "description": "Lead time, as an ISO 8601 duration, before the obligation deadline at which this warning fires. Multiple thresholds MAY declare escalating lead times; the processor fires each independently.",
+          "examples": [
+            "PT4H",
+            "P1D"
+          ]
+        },
+        "notify": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Actor identifier (role or individual) receiving the warning.",
+            "examples": [
+              "caseSupervisor"
+            ],
+            "x-wos": {
+              "openStringKind": "identifier"
+            }
+          },
+          "description": "Actor identifiers (roles or individuals) that receive the warning.",
+          "examples": [
+            [
+              "caseSupervisor"
+            ]
+          ]
+        },
+        "templateKey": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional notification-template key to render when this threshold fires; same convention as `WarningThreshold.templateKey`.",
+          "examples": [
+            "obligationImminentBreach"
+          ],
+          "x-wos": {
+            "openStringKind": "tagLabel"
+          }
+        }
+      }
+    },
+    "ObligationDeadline": {
+      "type": "object",
+      "required": [
+        "within"
+      ],
+      "patternProperties": {
+        "^x-": {
+          "$comment": "Vendor extensions per Kernel spec §10.6"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Deadline configuration for a durable obligation (ADR 0096 D-5). The runtime computes the deadline from the activation timestamp + `within`, schedules a deadline timer, and on expiry marks the obligation expired/violated and applies the policy's violation action (WOS-OBL-TIME-1001/1003/1004).",
+      "properties": {
+        "within": {
+          "type": "string",
+          "pattern": "^P(?:\\d+BD|(?!$)(?:\\d+Y)?(?:\\d+M)?(?:\\d+W)?(?:\\d+D)?(?:T(?=\\d)(?:\\d+H)?(?:\\d+M)?(?:\\d+S)?)?)$",
+          "description": "Time allowed to satisfy the obligation after activation. ISO 8601 duration; `P<N>BD` denotes N business days resolved against `calendarRef`. Validated by lint ACT-005.",
+          "examples": [
+            "P2D",
+            "PT4H",
+            "P5BD"
+          ]
+        },
+        "calendarRef": {
+          "type": "string",
+          "format": "uri",
+          "minLength": 1,
+          "description": "Business Calendar sidecar URI used to resolve `P<N>BD` business-day arithmetic. Calendar version is recorded in obligation state/provenance (WOS-OBL-TIME-1002).",
+          "examples": [
+            "urn:wos:calendar:federal-fy2026"
+          ],
+          "x-wos": {
+            "openStringKind": "uri"
+          }
+        },
+        "warningThresholds": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/ObligationWarningThreshold"
+          },
+          "description": "Pre-breach warnings fired before the deadline elapses.",
+          "examples": [
+            [
+              {
+                "beforeBreach": "PT4H",
+                "notify": [
+                  "caseSupervisor"
+                ]
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "ObligationViolationAction": {
+      "description": "What happens when an obligation is violated (deadline expiry or a `violateWhen` match). String shorthand for the parameter-free actions; object form for actions that carry parameters. When multiple policies fire simultaneously all violations are recorded but the strictest action wins, ordered `warn < escalate < fail < block` (ADR 0096; WOS-OBL-SPEC-0703).",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "warn",
+            "block",
+            "escalate",
+            "fail"
+          ],
+          "description": "Parameter-free violation action. `warn` records and proceeds; `escalate` reroutes to the configured escalation; `fail` fails the current operation; `block` prevents the offending kernel event from being applied.",
+          "examples": [
+            "block",
+            "warn"
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "action"
+          ],
+          "patternProperties": {
+            "^x-": {
+              "$comment": "Vendor extensions per Kernel spec §10.6"
+            }
+          },
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "warn",
+                "block",
+                "escalate",
+                "fail",
+                "createTask",
+                "emitEvent"
+              ],
+              "description": "Violation action. `createTask` requires `taskRef`; `emitEvent` requires `event`.",
+              "examples": [
+                "createTask",
+                "emitEvent",
+                "escalate"
+              ]
+            },
+            "taskRef": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Task catalog id to create when `action` = `createTask`. Created through the existing task pipeline and linked to the obligation id (WOS-OBL-RUNTIME-0912).",
+              "examples": [
+                "supervisorReview"
+              ],
+              "x-wos": {
+                "openStringKind": "identifier"
+              }
+            },
+            "event": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-zA-Z][a-zA-Z0-9_-]*$",
+              "description": "Kernel event name to emit when `action` = `emitEvent`.",
+              "examples": [
+                "obligationBreached"
+              ],
+              "x-wos": {
+                "openStringKind": "identifier"
+              }
+            },
+            "escalateTo": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Optional escalation target (event name or escalation-level id) when `action` = `escalate`. Defaults to the configured escalation path.",
+              "examples": [
+                "escalated",
+                "supervisor"
+              ],
+              "x-wos": {
+                "openStringKind": "identifier"
+              }
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Optional human-readable rationale recorded in violation provenance.",
+              "examples": [
+                "Underwriting review not completed before final approval."
+              ],
+              "x-wos": {
+                "openStringKind": "prose"
+              }
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "action": {
+                    "const": "createTask"
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              },
+              "then": {
+                "required": [
+                  "taskRef"
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "action": {
+                    "const": "emitEvent"
+                  }
+                },
+                "required": [
+                  "action"
+                ]
+              },
+              "then": {
+                "required": [
+                  "event"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "ObligationPolicy": {
+      "type": "object",
+      "required": [
+        "id",
+        "activateWhen",
+        "satisfyWhen",
+        "onViolation"
+      ],
+      "patternProperties": {
+        "^x-": {
+          "$comment": "Vendor extensions per Kernel spec §10.6"
+        }
+      },
+      "additionalProperties": false,
+      "description": "A durable, future-tense, cross-event workflow duty (ADR 0096 D-2/D-5): \"after X happens, Y must happen before Z or within T, by actor/role R, otherwise apply action A and record why.\" Distinct from the deontic `Obligation` (immediate pre-commit check on agent output) and the policy-engine `Obligation` (per-decision directive). On `activateWhen`, the runtime creates a `PendingObligation`; `satisfyWhen` discharges it; `cancelWhen` cancels it; deadline expiry or `violateWhen` violates it. WOS-native, not temporal logic — every clause is an ActivationCriteria whose `where` is a local FEL boolean.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Obligation policy identifier, unique within the governance block. Used to correlate pending obligations and provenance back to the policy.",
+          "examples": [
+            "income-change-review-required"
+          ],
+          "x-wos": {
+            "openStringKind": "identifier"
+          }
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable statement of the duty.",
+          "examples": [
+            "When reported income changes after submission, an independent underwriting review is required before final approval."
+          ],
+          "x-wos": {
+            "openStringKind": "prose"
+          }
+        },
+        "activateWhen": {
+          "$ref": "#/$defs/ActivationCriteria",
+          "description": "When a pending obligation is created. REQUIRED."
+        },
+        "satisfyWhen": {
+          "$ref": "#/$defs/ActivationCriteria",
+          "description": "When a pending obligation is discharged. REQUIRED. Honors `actor.notSameAsTriggerActor` for separation of duties."
+        },
+        "cancelWhen": {
+          "$ref": "#/$defs/ActivationCriteria",
+          "description": "Optional. When matched, the pending obligation is cancelled and no longer blocks or expires."
+        },
+        "violateWhen": {
+          "$ref": "#/$defs/ActivationCriteria",
+          "description": "Optional. An event that constitutes a violation if it occurs while the obligation is still pending; checked before the kernel event is applied so a `block` action can prevent it (WOS-OBL-RUNTIME-0907)."
+        },
+        "deadline": {
+          "$ref": "#/$defs/ObligationDeadline",
+          "description": "Optional. Schedules a deadline timer; expiry violates the obligation per `onViolation`."
+        },
+        "responsibleActor": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional actor accountable for satisfying the obligation.",
+          "examples": [
+            "underwriter-1"
+          ],
+          "x-wos": {
+            "openStringKind": "identifier"
+          }
+        },
+        "responsibleRole": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional role accountable for satisfying the obligation.",
+          "examples": [
+            "underwriter"
+          ],
+          "x-wos": {
+            "openStringKind": "identifier"
+          }
+        },
+        "duplicatePolicy": {
+          "type": "string",
+          "enum": [
+            "createEachTime",
+            "ignoreWhilePending",
+            "replaceExisting",
+            "coalesceByKey"
+          ],
+          "default": "ignoreWhilePending",
+          "description": "How re-activation behaves while an obligation from this policy is already pending. `createEachTime` always creates a new one; `ignoreWhilePending` (default) does not duplicate; `replaceExisting` cancels and replaces; `coalesceByKey` groups by the resolved `correlationKey`. Applied by WOS-OBL-RUNTIME-0904.",
+          "examples": [
+            "ignoreWhilePending",
+            "coalesceByKey"
+          ]
+        },
+        "correlationKey": {
+          "type": "string",
+          "minLength": 1,
+          "description": "FEL expression resolving to a coalescing key. REQUIRED when `duplicatePolicy` = `coalesceByKey`; obligations sharing a resolved key are coalesced.",
+          "examples": [
+            "event.field",
+            "caseFile.applicantId"
+          ],
+          "x-wos": {
+            "openStringKind": "fel"
+          }
+        },
+        "onViolation": {
+          "$ref": "#/$defs/ObligationViolationAction",
+          "description": "Action applied on violation (deadline expiry or `violateWhen`). REQUIRED."
+        },
+        "obligationHandling": {
+          "$ref": "#/$defs/PolicyObligationHandling",
+          "description": "Optional. Configures how an external policy-engine obligation directive (`PolicyDecision.obligations[]`, the runtime integration boundary — Governance §16.3) is handled when it correlates to this policy. `recordOnly` (the default behavior when absent) records the directive in provenance without creating a pending obligation; `{ \"mode\": \"materialize\", \"templateRef\": \"<uri>\" }` materializes it into a `PendingObligation` from the named template. An `indeterminate` policy decision is never coerced into an obligation (Governance §16.3). Additive (ADR 0096; WOS-INTEG-POLICY-1801)."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "duplicatePolicy": {
+                "const": "coalesceByKey"
+              }
+            },
+            "required": [
+              "duplicatePolicy"
+            ]
+          },
+          "then": {
+            "required": [
+              "correlationKey"
+            ]
+          }
+        }
+      ],
+      "examples": [
+        {
+          "id": "income-change-review-required",
+          "activateWhen": {
+            "on": {
+              "event": "caseFileUpdated"
+            },
+            "where": "event.field = 'income'"
+          },
+          "satisfyWhen": {
+            "on": {
+              "event": "underwritingReviewCompleted"
+            },
+            "actor": {
+              "role": "underwriter",
+              "notSameAsTriggerActor": true
+            }
+          },
+          "violateWhen": {
+            "on": {
+              "event": "finalApprovalRequested"
+            }
+          },
+          "deadline": {
+            "within": "P2D",
+            "calendarRef": "urn:wos:calendar:federal-fy2026"
+          },
+          "responsibleRole": "underwriter",
+          "duplicatePolicy": "ignoreWhilePending",
+          "onViolation": "block"
+        }
+      ],
+      "x-lm": {
+        "critical": true,
+        "intent": "Durable cross-event duty. `activateWhen`/`satisfyWhen` required; add `violateWhen`+`onViolation: block` to gate a premature event; add `deadline` to time-bound it. Each clause is an ActivationCriteria — never temporal logic. Distinct from deontic `Obligation` and policy-engine obligations."
+      }
+    },
+    "PolicyObligationHandling": {
+      "description": "How an external policy-engine obligation directive (`PolicyDecision.obligations[]`, the runtime integration boundary — Governance §16.3) is handled when it correlates to an obligation policy. Either the bare string `recordOnly` (record the directive in provenance, create no pending obligation — the conservative default) or an object selecting `materialize` mode with a `templateRef` that names the obligation template to instantiate. An `indeterminate` policy decision is never coerced into an obligation (ADR 0096; WOS-INTEG-POLICY-1801).",
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "recordOnly",
+          "description": "Record the policy-engine obligation directive in provenance without creating a `PendingObligation`. The conservative default; equivalent to omitting `obligationHandling`."
+        },
+        {
+          "type": "object",
+          "required": [
+            "mode",
+            "templateRef"
+          ],
+          "additionalProperties": false,
+          "patternProperties": {
+            "^x-": {
+              "$comment": "Vendor extensions per Kernel spec §10.6"
+            }
+          },
+          "description": "Materialize the policy-engine obligation directive into a `PendingObligation` from the named template.",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "const": "materialize",
+              "description": "Selects materialization: the correlated policy-engine obligation directive is turned into a `PendingObligation`."
+            },
+            "templateRef": {
+              "type": "string",
+              "format": "uri",
+              "minLength": 1,
+              "description": "URI of the obligation template the directive materializes into. Resolved at load/lint time, not lazily at runtime (same convention as `activationCriteriaRef`); an unresolved reference is a lint/runtime rejection.",
+              "examples": [
+                "urn:wos:obligation-template:policy-engine-directive",
+                "https://agency.gov/wos/obligation-templates/decision-directive"
+              ],
+              "x-wos": {
+                "openStringKind": "uri"
+              }
+            }
+          }
+        }
+      ],
+      "examples": [
+        "recordOnly",
+        {
+          "mode": "materialize",
+          "templateRef": "urn:wos:obligation-template:policy-engine-directive"
+        }
+      ],
+      "x-lm": {
+        "intent": "Bridge from a runtime policy-engine obligation directive to WOS durable obligations. Use `recordOnly` to log without materializing, or `{ mode: materialize, templateRef }` to instantiate a pending obligation. Never coerces an `indeterminate` decision."
+      }
+    },
     "SlaDefinition": {
       "type": "object",
       "required": [
@@ -8982,6 +9790,18 @@
           "examples": [
             "applicantResponseReceived",
             "caseReadyForReview"
+          ]
+        },
+        "startWhen": {
+          "$ref": "#/$defs/ActivationCriteria",
+          "description": "Optional. An ActivationCriteria whose match starts the SLA clock, offered additively alongside the existing `startAt`/`startEvent` pair (ADR 0096; WOS-INTEG-SLA-1401). When present, the clock starts on the first match of this criteria (e.g. an event plus an FEL guard, or an actor/required-data gate) rather than on a bare `startAt` lifecycle point or `startEvent` name. The `within` clause of the criteria is ignored here — `expectedDuration` is the authoritative SLA window. Backward-compatible: `startAt`/`startEvent` remain required and govern when `startWhen` is absent.",
+          "examples": [
+            {
+              "on": {
+                "event": "caseFileUpdated"
+              },
+              "where": "event.field = 'income'"
+            }
           ]
         }
       },
@@ -9576,6 +10396,18 @@
           "x-wos": {
             "openStringKind": "tagLabel"
           }
+        },
+        "resumeWhen": {
+          "$ref": "#/$defs/ActivationCriteria",
+          "description": "Optional. An ActivationCriteria that resumes the case from this hold, offered additively alongside the existing `resumeTrigger` event name (ADR 0096; WOS-INTEG-HOLD-1501). When present, the case resumes on the first match (e.g. an event plus an FEL guard, an actor constraint, or — with `on.eventScope: related` — a related-case event for a `pending-related-case` hold). Backward-compatible: `resumeTrigger` is still required (except for `legal-hold`) and governs when `resumeWhen` is absent; the two are complementary, not mutually exclusive. Like `resumeTrigger`, this is event-driven, not a polled FEL condition.",
+          "examples": [
+            {
+              "on": {
+                "event": "relatedCaseClosed",
+                "eventScope": "related"
+              }
+            }
+          ]
         },
         "timeoutAction": {
           "type": "string",

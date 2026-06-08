@@ -10,13 +10,14 @@ A vendor implementing `$wosWorkflow@1.0` declares which embedded blocks they exe
 |---|---|---|
 | (none — bare core) | Kernel-Basic conformance | `wos-kernel@1.0` |
 | `governance` | Governance fixtures + due-process pipeline tests | `wos-governance@1.0` |
+| `governance.obligationPolicies[]` (activation criteria + durable obligations, [ADR 0096](thoughts/adr/0096-shared-activation-criteria-and-durable-obligations.md)) | `OBL-001..013` runtime fixtures + `ACT-001..010` lint | within `wos-governance@1.0` (governance subset) |
 | `agents` + `aiOversight` | AI deontic + autonomy + drift fixtures | `wos-ai@1.0` |
 | `signature` | T4 SIG-* conformance suite (signature.md ⇒ embedded `signature` block) | T4 (separate per Q11) |
 | `custody` | Trellis custody-anchor cross-stack fixtures | (cross-stack, not stream-scoped) |
 | `advanced` | Advanced equity + DCR + verifiable-constraints fixtures | `wos-advanced@1.0` |
 | `assurance` | Assurance attestation fixtures | (typically paired with governance) |
 
-A vendor's claim string: `$wosWorkflow@1.0 [governance, agents, aiOversight, signature]`.
+A vendor's claim string: `$wosWorkflow@1.0 [governance, agents, aiOversight, signature]`. A vendor exercising durable obligation policies notes the governance subset, e.g. `$wosWorkflow@1.0 [governance(obligations)]` — the obligation/activation block composes under the same envelope version ([ADR 0096](thoughts/adr/0096-shared-activation-criteria-and-durable-obligations.md); it adds no new top-level marker and no new stream).
 
 WOS ships as **four independent release streams** inside one repository. Each stream
 owns a set of source paths, a publishing cadence, and a stability commitment. Vendor

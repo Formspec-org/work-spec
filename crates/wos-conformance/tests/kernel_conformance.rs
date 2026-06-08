@@ -1238,3 +1238,164 @@ fn i002_outputbinding_wildcard_extracts_array() {
         "updatedPaths must include 'caseFile.items', got: {updated_paths:?}"
     );
 }
+
+// ── Phase-7: Durable obligations (ADR 0096; Governance §16) ──────
+//
+// WOS-CONF-2301..2313. Expected traces in these fixtures are AUTHORED-NOT-RUN
+// (the authoring sandbox lacked the fel-core sibling to execute the runtime)
+// and must be confirmed by this CI run. The negative/absence cases (OBL-002,
+// OBL-006, OBL-008) carry an explicit count assertion below because the
+// presence-only expected_provenance matcher cannot assert the absence of a
+// record; the positive cases use the standard pass assertion.
+
+/// Run an OBL fixture and return its conformance result for count assertions.
+fn run_obl_fixture(name: &str) -> wos_conformance::ConformanceResult {
+    let path = fixture_path(name);
+    let fixture_json = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("could not read fixture '{path}': {e}"));
+    let base_dir = std::path::Path::new(&path)
+        .parent()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    run_fixture(&fixture_json, &base_dir)
+        .unwrap_or_else(|e| panic!("fixture '{name}' engine error: {e}"))
+}
+
+fn obligation_kind_count(
+    result: &wos_conformance::ConformanceResult,
+    kind: wos_conformance::ProvenanceKind,
+) -> usize {
+    result
+        .provenance
+        .iter()
+        .filter(|p| p.record_kind == kind)
+        .count()
+}
+
+/// OBL-001: An activating event creates one pending obligation (ObligationActivated).
+#[test]
+fn obl001_activation_creates_pending() {
+    assert_fixture_passes("OBL-001-activation-creates-pending.json");
+}
+
+/// OBL-002: A false where-guard creates no pending obligation (no ObligationActivated).
+#[test]
+fn obl002_no_activation_when_where_false() {
+    assert_fixture_passes("OBL-002-no-activation-when-where-false.json");
+    let result = run_obl_fixture("OBL-002-no-activation-when-where-false.json");
+    assert_eq!(
+        obligation_kind_count(&result, wos_conformance::ProvenanceKind::ObligationActivated),
+        0,
+        "a false where-guard must not activate any obligation"
+    );
+}
+
+/// OBL-003: An independent underwriter discharges the obligation (ObligationSatisfied).
+#[test]
+fn obl003_satisfy() {
+    assert_fixture_passes("OBL-003-satisfy.json");
+}
+
+/// OBL-004: A premature finalApprovalRequested is blocked (ObligationViolated; transition does not fire).
+#[test]
+fn obl004_violation_before_satisfaction_blocks() {
+    assert_fixture_passes("OBL-004-violation-before-satisfaction-blocks.json");
+    let result = run_obl_fixture("OBL-004-violation-before-satisfaction-blocks.json");
+    // The blocked event must not transition to `approved`.
+    assert!(
+        !result
+            .transitions
+            .iter()
+            .any(|t| t.to == "approved"),
+        "blocked finalApprovalRequested must not transition to approved"
+    );
+}
+
+/// OBL-005: A deadline elapse violates/expires the obligation (ObligationExpired).
+#[test]
+fn obl005_deadline_expiry_violates() {
+    assert_fixture_passes("OBL-005-deadline-expiry-violates.json");
+}
+
+/// OBL-006: A cancelWhen match cancels the obligation; a later deadline does not expire it.
+#[test]
+fn obl006_cancellation() {
+    assert_fixture_passes("OBL-006-cancellation.json");
+    let result = run_obl_fixture("OBL-006-cancellation.json");
+    assert_eq!(
+        obligation_kind_count(&result, wos_conformance::ProvenanceKind::ObligationCancelled),
+        1,
+        "cancelWhen must cancel exactly once"
+    );
+    assert_eq!(
+        obligation_kind_count(&result, wos_conformance::ProvenanceKind::ObligationExpired),
+        0,
+        "a cancelled obligation must not later expire"
+    );
+}
+
+/// OBL-007: A wrong-role actor does not satisfy; the correct role does (exactly one ObligationSatisfied).
+#[test]
+fn obl007_actor_role_mismatch() {
+    assert_fixture_passes("OBL-007-actor-role-mismatch.json");
+    let result = run_obl_fixture("OBL-007-actor-role-mismatch.json");
+    assert_eq!(
+        obligation_kind_count(&result, wos_conformance::ProvenanceKind::ObligationSatisfied),
+        1,
+        "only the correct-role independent actor may satisfy the obligation"
+    );
+}
+
+/// OBL-008: A duplicate trigger under ignoreWhilePending yields a single pending obligation.
+#[test]
+fn obl008_duplicate_ignore_while_pending() {
+    assert_fixture_passes("OBL-008-duplicate-ignore-while-pending.json");
+    let result = run_obl_fixture("OBL-008-duplicate-ignore-while-pending.json");
+    assert_eq!(
+        obligation_kind_count(&result, wos_conformance::ProvenanceKind::ObligationActivated),
+        1,
+        "ignoreWhilePending must produce exactly one activation"
+    );
+}
+
+/// OBL-009: Two activate->satisfy cycles produce deterministic ids and a stable provenance order.
+#[test]
+fn obl009_replay_determinism() {
+    assert_fixture_passes("OBL-009-replay-determinism.json");
+    // Replay-determinism proper: running the same fixture twice yields the same
+    // provenance kind/data sequence and the same observed transitions.
+    let a = run_obl_fixture("OBL-009-replay-determinism.json");
+    let b = run_obl_fixture("OBL-009-replay-determinism.json");
+    let kinds_a: Vec<_> = a.provenance.iter().map(|p| (p.record_kind, p.data.clone())).collect();
+    let kinds_b: Vec<_> = b.provenance.iter().map(|p| (p.record_kind, p.data.clone())).collect();
+    assert_eq!(kinds_a, kinds_b, "replayed provenance must be identical in kind and data order");
+    let tr_a: Vec<_> = a.transitions.iter().map(|t| (t.from.clone(), t.to.clone(), t.event.clone())).collect();
+    let tr_b: Vec<_> = b.transitions.iter().map(|t| (t.from.clone(), t.to.clone(), t.event.clone())).collect();
+    assert_eq!(tr_a, tr_b, "replayed transitions must be identical");
+}
+
+/// OBL-010: Business-calendar deadline (best-effort; business-day expiry is the WOS-OBL-TIME-1002 follow-up).
+#[test]
+fn obl010_business_calendar_deadline() {
+    assert_fixture_passes("OBL-010-business-calendar-deadline.json");
+}
+
+/// OBL-011: DCR bridge (DEFERRED placeholder; exercises only the plain activation path).
+#[test]
+fn obl011_dcr_bridge() {
+    assert_fixture_passes("OBL-011-dcr-bridge.json");
+}
+
+/// OBL-012: Policy-engine obligationHandling:materialize creates a pending obligation.
+#[test]
+fn obl012_policy_engine_materialization() {
+    assert_fixture_passes("OBL-012-policy-engine-materialization.json");
+}
+
+/// OBL-013: A supervisory agent's assessment activates an independent-review obligation; a human review satisfies.
+#[test]
+fn obl013_ai_review_window() {
+    assert_fixture_passes("OBL-013-ai-review-window.json");
+}

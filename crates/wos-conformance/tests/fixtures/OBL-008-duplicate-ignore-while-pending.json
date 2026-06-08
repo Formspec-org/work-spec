@@ -1,0 +1,74 @@
+{
+  "_note": "AUTHORED-NOT-RUN (see OBL-001 _note). duplicatePolicy:ignoreWhilePending: the same caseFileUpdated trigger fires twice while one obligation is already Pending; evaluate_activations skips the second (pending_same>0), so exactly ONE pending obligation and ONE ObligationActivated exist (obligationId '#0' only; no '#1'). Each fixture event gets a distinct engine idempotency token, so it is the duplicatePolicy (not replay-dedupe) doing the suppression here. The harness cannot assert the absence of a second activation via expected_provenance; a dedicated harness test should assert obligationActivated count == 1.",
+  "id": "WOS-CONF-2308-OBL-008-duplicate-ignore-while-pending",
+  "rule": "WOS-OBL-RUNTIME-0904",
+  "description": "Duplicate suppression: two identical activating events under duplicatePolicy:ignoreWhilePending yield a single pending obligation and a single ObligationActivated (ADR 0096 §16.2).",
+  "documents": {
+    "kernel": "inline"
+  },
+  "inline_documents": {
+    "kernel": {
+      "$wosWorkflow": "1.0",
+      "url": "urn:test:OBL-008",
+      "version": "1.0.0",
+      "title": "OBL-008 Duplicate Ignore While Pending",
+      "status": "active",
+      "impactLevel": "rightsImpacting",
+      "actors": [
+        { "id": "caseworker", "type": "human", "description": "Caseworker" },
+        { "id": "underwriter", "type": "human", "description": "Independent underwriter" }
+      ],
+      "lifecycle": {
+        "initialState": "open",
+        "states": {
+          "open": {
+            "type": "atomic",
+            "transitions": [
+              { "event": "caseFileUpdated", "target": "open" }
+            ]
+          }
+        }
+      },
+      "caseFile": {
+        "fields": {
+          "income": { "type": "number" }
+        }
+      },
+      "governance": {
+        "obligationPolicies": [
+          {
+            "id": "income-change-review-required",
+            "activateWhen": { "on": { "event": "caseFileUpdated" }, "where": "event.field = 'income'" },
+            "satisfyWhen": {
+              "on": { "event": "underwritingReviewCompleted" },
+              "actor": { "role": "underwriter", "notSameAsTriggerActor": true }
+            },
+            "responsibleRole": "underwriter",
+            "duplicatePolicy": "ignoreWhilePending",
+            "onViolation": "block"
+          }
+        ]
+      },
+      "execution": {
+        "workflowTimeout": "P90D",
+        "defaultTaskTimeout": "P7D",
+        "instanceVersioning": "pinned"
+      }
+    }
+  },
+  "initial_case_state": {},
+  "event_sequence": [
+    { "event": "caseFileUpdated", "actor": "caseworker", "data": { "field": "income" } },
+    { "event": "caseFileUpdated", "actor": "caseworker", "data": { "field": "income" } }
+  ],
+  "expected_transitions": [
+    { "from": "open", "target": "open", "event": "caseFileUpdated" },
+    { "from": "open", "target": "open", "event": "caseFileUpdated" }
+  ],
+  "expected_provenance": [
+    {
+      "record_kind": "obligationActivated",
+      "data": { "policyId": "income-change-review-required", "obligationId": "income-change-review-required#0" }
+    }
+  ]
+}
