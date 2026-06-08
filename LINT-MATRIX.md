@@ -98,11 +98,11 @@
 |-----|----------|------------|---------|------------------|
 | `ACT-001` | ACT | draft | Obligation-policy activation criteria `where` MUST be valid FEL. | — |
 | `ACT-002` | ACT | draft | Obligation-policy activation criteria `where` AST root MUST be boolean-shaped (no truthy coercion). | — |
-| `ACT-003` | ACT | planned | Activation trigger `on.event` SHOULD resolve to a known workflow event. | — |
-| `ACT-004` | ACT | planned | Activation `requiredData` paths SHOULD resolve to known case-file fields. | — |
-| `ACT-005` | ACT | planned | Activation/deadline `within` MUST be a valid ISO 8601 / `P<N>BD` duration. | — |
-| `ACT-006` | ACT | planned | Business-day `within` SHOULD declare a resolvable `calendarRef`. | — |
-| `ACT-007` | ACT | planned | `activationCriteriaRef` MUST resolve to a named criteria (no duplicate ids). | — |
+| `ACT-003` | ACT | draft | Activation trigger `on.event` SHOULD resolve to a known workflow event. | — |
+| `ACT-004` | ACT | draft | Activation `requiredData` paths SHOULD resolve to known case-file fields. | — |
+| `ACT-005` | ACT | draft | Activation/deadline `within` MUST be a valid ISO 8601 / `P<N>BD` duration. | — |
+| `ACT-006` | ACT | draft | Business-day `within` SHOULD declare a resolvable `calendarRef`. | — |
+| `ACT-007` | ACT | draft | `activationCriteriaRef` MUST resolve to a named criteria (no duplicate ids). | — |
 | `AG-008` | AG | draft | Side-effect tools at `autonomous` autonomy MUST declare a `sideEffectPolicy`. | — |
 | `AG-010` | AG | draft | Verifiable constraints MUST satisfy all SMT subset restrictions (parse failures). | — |
 | `AG-011` | AG | draft | `let` bindings in verifiable expressions MUST NOT be recursive. | — |
@@ -179,7 +179,7 @@
 | `WOS-AGENT-XREF-001` | WOS | tested | Every actor with `type=='agent'` MUST have a matching `agents[].id` (ADR 0076 D-2 cross-reference). | inline (`tier2.rs::tests::wos_agent_xref_001_*`) |
 | `WOS-SIG-COVER-001` | WOS | tested | Signature-gated transitions MUST be covered by `signature.signers[]` (ADR 0076 D-2 cross-reference). | inline (`tier2.rs::tests::wos_sig_cover_001_*`) |
 
-**T2 total: 75** (1 LoadBearing, 0 Stable, 4 Tested, 70 Draft)
+**T2 total: 80** (1 LoadBearing, 0 Stable, 4 Tested, 75 Draft)
 
 ---
 

@@ -92,6 +92,11 @@ fn check_workflow_fel(doc: &WosDocument, diagnostics: &mut Vec<LintDiagnostic>) 
     check_governance_fel(doc, diagnostics);
     // Obligation-policy activation criteria FEL (ACT-001, ACT-002)
     check_obligation_activation_fel(doc, diagnostics);
+    // Obligation-policy structural / resolution checks
+    // (ACT-003 event resolution, ACT-004 requiredData resolution, ACT-005
+    // duration validity, ACT-006 business-day calendar pairing, ACT-007
+    // activationCriteriaRef resolution).
+    check_obligation_activation_structure(doc, diagnostics);
     // AI integration FEL (agent conditions, deontic expressions)
     check_ai_integration_fel(doc, diagnostics);
     // Advanced governance FEL (equity expressions, SMT constraints)
@@ -1165,6 +1170,436 @@ fn visit_children(expr: &Expr, f: &mut impl FnMut(&Expr)) {
 }
 
 // ---------------------------------------------------------------------------
+// ACT-003 .. ACT-007: obligation-policy activation-criteria structure
+// ---------------------------------------------------------------------------
+
+/// Structural / resolution checks over `governance.obligationPolicies[*]`
+/// (ADR 0096; Governance §16.4). Walks each policy's four clause slots plus
+/// the policy-level `deadline` and dispatches:
+///
+/// - ACT-003 (warning): `on.event` SHOULD name a known workflow event.
+/// - ACT-004 (warning): `requiredData` `caseFile.*` paths SHOULD resolve to a
+///   declared case-file field (skipped when the case file is contract-backed).
+/// - ACT-005 (error): `within` (clause + `deadline.within`) MUST be a valid
+///   ISO-8601 duration or the WOS `P<N>BD` business-day form.
+/// - ACT-006 (warning): a business-day `within` SHOULD pair with a
+///   `calendarRef`.
+/// - ACT-007 (error): `activationCriteriaRef` MUST resolve to a named criteria
+///   (local `#/$defs/...` pointer resolution; no duplicate ids).
+fn check_obligation_activation_structure(doc: &WosDocument, diagnostics: &mut Vec<LintDiagnostic>) {
+    let Some(policies) = doc
+        .value
+        .pointer("/governance/obligationPolicies")
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    let known_events = collect_known_events(&doc.value);
+    let case_file_fields = collect_case_file_fields(&doc.value);
+
+    const CLAUSES: [&str; 4] = ["activateWhen", "satisfyWhen", "cancelWhen", "violateWhen"];
+    for (i, policy) in policies.iter().enumerate() {
+        for clause in CLAUSES {
+            let Some(criteria) = policy.get(clause) else {
+                continue;
+            };
+            let base = format!("/governance/obligationPolicies/{i}/{clause}");
+
+            // ACT-007: a referenced criteria carries no inline body — resolve
+            // the pointer instead of inspecting its fields.
+            if let Some(ref_str) = criteria.get("activationCriteriaRef").and_then(Value::as_str) {
+                check_activation_criteria_ref(ref_str, &doc.value, &base, diagnostics);
+                continue;
+            }
+
+            check_activation_criteria_body(
+                criteria,
+                &base,
+                &known_events,
+                &case_file_fields,
+                diagnostics,
+            );
+        }
+
+        // Policy-level `deadline.within` is the same duration grammar (ACT-005)
+        // and pairs with `deadline.calendarRef` for business-day forms (ACT-006).
+        if let Some(deadline) = policy.get("deadline") {
+            let base = format!("/governance/obligationPolicies/{i}/deadline");
+            check_within_and_calendar(deadline, &base, diagnostics);
+        }
+    }
+}
+
+/// Run the body-level checks (ACT-003/004/005/006) over an inline
+/// `ActivationCriteria` object.
+fn check_activation_criteria_body(
+    criteria: &Value,
+    base: &str,
+    known_events: &Option<HashSet<String>>,
+    case_file_fields: &CaseFileFields,
+    diagnostics: &mut Vec<LintDiagnostic>,
+) {
+    // ACT-003: trigger event resolution.
+    if let Some(event) = criteria.pointer("/on/event").and_then(Value::as_str) {
+        if let Some(events) = known_events {
+            // Escape hatch: a `$`-prefixed or `*` event name is treated as a
+            // dynamic / unknowable trigger and is never flagged.
+            if !event.is_empty()
+                && !event.starts_with('$')
+                && event != "*"
+                && !events.contains(event)
+            {
+                diagnostics.push(LintDiagnostic::t2_warning(
+                    "ACT-003",
+                    format!("{base}/on/event"),
+                    format!(
+                        "activation trigger event '{event}' does not match any workflow \
+                         transition event or declared timer-fire event; verify the trigger \
+                         name (Governance §16.4)"
+                    ),
+                ));
+            }
+        }
+    }
+
+    // ACT-004: requiredData path resolution.
+    if let Some(required) = criteria.get("requiredData").and_then(Value::as_array) {
+        for (j, entry) in required.iter().enumerate() {
+            let Some(path_str) = entry.as_str() else {
+                continue;
+            };
+            check_required_data_path(path_str, &format!("{base}/requiredData/{j}"), case_file_fields, diagnostics);
+        }
+    }
+
+    // ACT-005 + ACT-006: `within` validity and business-day calendar pairing.
+    check_within_and_calendar(criteria, base, diagnostics);
+}
+
+/// ACT-005 + ACT-006: validate a `within` string in `obj` and, when it is a
+/// business-day duration, check for a sibling `calendarRef`.
+fn check_within_and_calendar(obj: &Value, base: &str, diagnostics: &mut Vec<LintDiagnostic>) {
+    let Some(within) = obj.get("within").and_then(Value::as_str) else {
+        return;
+    };
+    match classify_duration(within) {
+        DurationKind::Invalid => {
+            diagnostics.push(LintDiagnostic::t2_error(
+                "ACT-005",
+                format!("{base}/within"),
+                format!(
+                    "`within` '{within}' is not a valid ISO-8601 duration or WOS business-day \
+                     form `P<N>BD`; 'indefinite' and empty/garbage values are rejected \
+                     (Governance §16.4)"
+                ),
+            ));
+        }
+        DurationKind::BusinessDay => {
+            // ACT-006: business-day arithmetic needs a calendar to resolve.
+            if obj.get("calendarRef").and_then(Value::as_str).is_none() {
+                diagnostics.push(LintDiagnostic::t2_warning(
+                    "ACT-006",
+                    format!("{base}/within"),
+                    format!(
+                        "business-day duration '{within}' should declare a sibling `calendarRef` \
+                         so business days resolve against a known calendar (Governance §16.4; \
+                         cf. G-023)"
+                    ),
+                ));
+            }
+        }
+        DurationKind::Iso => {}
+    }
+}
+
+/// ACT-004: check one `requiredData` dotted path against the declared
+/// case-file fields. `caseFile.*` paths whose top field is undeclared warn;
+/// non-`caseFile` roots are out of scope here. Obviously malformed paths
+/// (empty, trailing/leading/double dots) always warn.
+fn check_required_data_path(
+    path_str: &str,
+    path: &str,
+    fields: &CaseFileFields,
+    diagnostics: &mut Vec<LintDiagnostic>,
+) {
+    if path_str.is_empty()
+        || path_str.starts_with('.')
+        || path_str.ends_with('.')
+        || path_str.contains("..")
+    {
+        diagnostics.push(LintDiagnostic::t2_warning(
+            "ACT-004",
+            path,
+            format!("requiredData path '{path_str}' is malformed (empty or dangling segment)"),
+        ));
+        return;
+    }
+    let Some(rest) = path_str.strip_prefix("caseFile.") else {
+        // Not a case-file path (e.g. `event.field`) — out of ACT-004 scope.
+        return;
+    };
+    match fields {
+        // Contract-backed / external case file: field set is not knowable
+        // from this document, so resolution is skipped.
+        CaseFileFields::External => {}
+        CaseFileFields::Inline(declared) => {
+            let top = rest.split('.').next().unwrap_or(rest);
+            if !declared.contains(top) {
+                diagnostics.push(LintDiagnostic::t2_warning(
+                    "ACT-004",
+                    path,
+                    format!(
+                        "requiredData path '{path_str}' references undeclared case-file field \
+                         '{top}'; declare it under `caseFile.fields` (Governance §16.4)"
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+/// ACT-007: resolve an `activationCriteriaRef`. Local JSON-pointer references
+/// (`#/$defs/...`) MUST resolve within the document; external URIs are accepted
+/// (cross-document resolution is out of scope at T2 here).
+fn check_activation_criteria_ref(
+    ref_str: &str,
+    root: &Value,
+    base: &str,
+    diagnostics: &mut Vec<LintDiagnostic>,
+) {
+    let path = format!("{base}/activationCriteriaRef");
+    if ref_str.is_empty() {
+        diagnostics.push(LintDiagnostic::t2_error(
+            "ACT-007",
+            path,
+            "activationCriteriaRef is empty; it must name a criteria",
+        ));
+        return;
+    }
+    // Only local fragment pointers are resolvable here; treat a bare `#...`
+    // or `#/...` as a JSON pointer into this document.
+    let Some(fragment) = ref_str.strip_prefix('#') else {
+        // External URI (`https://.../#/$defs/x`, relative file, etc.) — accept;
+        // cross-document resolution is not a single-document concern.
+        return;
+    };
+    if root.pointer(fragment).is_none() {
+        diagnostics.push(LintDiagnostic::t2_error(
+            "ACT-007",
+            path,
+            format!(
+                "activationCriteriaRef '{ref_str}' does not resolve to a node in this document \
+                 (Governance §16.4)"
+            ),
+        ));
+    }
+}
+
+/// Declared case-file field set, or a sentinel for a contract-backed file.
+enum CaseFileFields {
+    /// Inline `caseFile.fields` — the set of declared top-level field names.
+    Inline(HashSet<String>),
+    /// `caseFile.contractRef` — fields defined externally; resolution skipped.
+    External,
+}
+
+/// Collect the inline case-file field names, or detect a contract-backed file.
+///
+/// Mirrors the `caseFile` `oneOf` in `wos-workflow.schema.json` (inline
+/// `fields` map vs. `contractRef`). Absent `caseFile` is treated as an empty
+/// inline declaration so obviously-undeclared paths still warn.
+fn collect_case_file_fields(root: &Value) -> CaseFileFields {
+    let Some(case_file) = root.get("caseFile") else {
+        return CaseFileFields::Inline(HashSet::new());
+    };
+    if case_file.get("contractRef").is_some() {
+        return CaseFileFields::External;
+    }
+    let mut names = HashSet::new();
+    if let Some(fields) = case_file.get("fields").and_then(Value::as_object) {
+        for key in fields.keys() {
+            names.insert(key.clone());
+        }
+    }
+    CaseFileFields::Inline(names)
+}
+
+/// Collect statically-present workflow event names for ACT-003.
+///
+/// Candidates: every `lifecycle.states.*.transitions[*].event` (recursing into
+/// compound substates and parallel regions) plus any `startTimer` action's
+/// `fireEvent`/`event` field (timer-fire events). Returns `None` when no
+/// lifecycle is present — in which case ACT-003 cannot judge and stays silent.
+fn collect_known_events(root: &Value) -> Option<HashSet<String>> {
+    let states = root.pointer("/lifecycle/states").and_then(Value::as_object)?;
+    let mut events = HashSet::new();
+    collect_events_from_states(states, &mut events);
+    Some(events)
+}
+
+/// Recursively harvest transition events and timer-fire events from a state map.
+fn collect_events_from_states(
+    states: &serde_json::Map<String, Value>,
+    events: &mut HashSet<String>,
+) {
+    for state in states.values() {
+        if let Some(transitions) = state.get("transitions").and_then(Value::as_array) {
+            for transition in transitions {
+                if let Some(event) = transition.get("event").and_then(Value::as_str) {
+                    events.insert(event.to_string());
+                }
+            }
+        }
+        // Timer-fire events: `startTimer` actions may name the event they emit.
+        collect_timer_fire_events(state, events);
+        if let Some(substates) = state.get("states").and_then(Value::as_object) {
+            collect_events_from_states(substates, events);
+        }
+        if let Some(regions) = state.get("regions").and_then(Value::as_object) {
+            for region in regions.values() {
+                if let Some(rstates) = region.get("states").and_then(Value::as_object) {
+                    collect_events_from_states(rstates, events);
+                }
+            }
+        }
+    }
+}
+
+/// Harvest `fireEvent` / `event` names from any `startTimer` actions on a state.
+///
+/// Actions can live under `entryActions`, `exitActions`, or transition
+/// `actions`; we scan every array of objects on the state for an action whose
+/// `action == "startTimer"` that statically names the event it will fire.
+fn collect_timer_fire_events(state: &Value, events: &mut HashSet<String>) {
+    let Some(obj) = state.as_object() else {
+        return;
+    };
+    let mut harvest = |arr: &Value| {
+        if let Some(actions) = arr.as_array() {
+            for action in actions {
+                if action.get("action").and_then(Value::as_str) == Some("startTimer") {
+                    for key in ["fireEvent", "event"] {
+                        if let Some(ev) = action.get(key).and_then(Value::as_str) {
+                            events.insert(ev.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    };
+    for (key, value) in obj {
+        if key == "entryActions" || key == "exitActions" {
+            harvest(value);
+        }
+    }
+    if let Some(transitions) = obj.get("transitions").and_then(Value::as_array) {
+        for transition in transitions {
+            if let Some(actions) = transition.get("actions") {
+                harvest(actions);
+            }
+        }
+    }
+}
+
+/// Outcome of duration classification for ACT-005 / ACT-006.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DurationKind {
+    /// A standard ISO-8601 duration (`P…`, with optional time component).
+    Iso,
+    /// The WOS business-day form `P<N>BD` (N a positive integer).
+    BusinessDay,
+    /// Not a recognized duration (empty, `indefinite`, garbage, malformed).
+    Invalid,
+}
+
+/// Classify a `within` string per ADR 0096 / Governance §16.4.
+///
+/// Hand-rolled rather than regex-backed (the crate has no `regex` dep): we
+/// accept the WOS business-day form `P<N>BD` (positive integer N) and a
+/// conservative ISO-8601 duration grammar
+/// `P[nY][nM][nW][nD][T[nH][nM][nS]]` with at least one component and digits
+/// in every component slot. `indefinite` and empty strings are explicitly
+/// rejected (unlike G-055's hold `expectedDuration`, activation `within` has
+/// no indefinite form).
+fn classify_duration(s: &str) -> DurationKind {
+    if s == "P0BD" {
+        // Zero business days is a degenerate trigger window — reject as garbage.
+        return DurationKind::Invalid;
+    }
+    if let Some(n) = s.strip_prefix('P').and_then(|r| r.strip_suffix("BD")) {
+        // `P<N>BD`: N must be a non-empty run of ASCII digits, N >= 1.
+        if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) {
+            return DurationKind::BusinessDay;
+        }
+        return DurationKind::Invalid;
+    }
+    if is_iso8601_duration(s) {
+        DurationKind::Iso
+    } else {
+        DurationKind::Invalid
+    }
+}
+
+/// Conservative ISO-8601 duration validator: `P[nY][nM][nW][nD][T[nH][nM][nS]]`.
+///
+/// Requires the leading `P`, at least one numeric component, digits preceding
+/// every designator, and no trailing/garbage characters. A lone `P` or `PT`
+/// is rejected.
+fn is_iso8601_duration(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix('P') else {
+        return false;
+    };
+    if rest.is_empty() {
+        return false;
+    }
+    let (date_part, time_part) = match rest.split_once('T') {
+        Some((d, t)) => (d, Some(t)),
+        None => (rest, None),
+    };
+    let mut saw_component = false;
+    // Date designators in canonical order Y, M, W, D.
+    if !consume_designators(date_part, &['Y', 'M', 'W', 'D'], &mut saw_component) {
+        return false;
+    }
+    if let Some(time_part) = time_part {
+        // A `T` with no following time component is malformed.
+        if time_part.is_empty() {
+            return false;
+        }
+        if !consume_designators(time_part, &['H', 'M', 'S'], &mut saw_component) {
+            return false;
+        }
+    }
+    saw_component
+}
+
+/// Consume `segment` as a run of `<digits><designator>` pairs whose designators
+/// appear in `order` (each at most once, in order). Returns false on any stray
+/// character, missing digits, or out-of-order/duplicate designator.
+fn consume_designators(segment: &str, order: &[char], saw_component: &mut bool) -> bool {
+    let mut idx = 0usize; // position within `order`
+    let mut digits = String::new();
+    for ch in segment.chars() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+            continue;
+        }
+        // Must be a designator; find it at or after the current order position.
+        let Some(pos) = order[idx..].iter().position(|d| *d == ch) else {
+            return false;
+        };
+        if digits.is_empty() {
+            return false; // designator with no preceding digits
+        }
+        idx += pos + 1;
+        digits.clear();
+        *saw_component = true;
+    }
+    // Any leftover digits without a trailing designator is malformed.
+    digits.is_empty()
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -2117,5 +2552,347 @@ mod tests {
         let mut diag = Vec::new();
         check_obligation_activation_fel(&doc, &mut diag);
         assert!(diag.is_empty(), "unexpected: {diag:?}");
+    }
+
+    // --- ACT-003 .. ACT-007: activation-criteria structure ---
+
+    /// Build a workflow with one obligation policy whose `activateWhen` is the
+    /// given criteria object, plus a minimal lifecycle and inline case file.
+    fn workflow_with_activate_when(activate_when: serde_json::Value) -> WosDocument {
+        make_doc(
+            DocumentKind::Workflow,
+            json!({
+                "$wosWorkflow": true,
+                "caseFile": { "fields": { "income": { "type": "number" } } },
+                "lifecycle": {
+                    "states": {
+                        "open": {
+                            "transitions": [{ "event": "caseFileUpdated", "target": "review" }]
+                        },
+                        "review": {}
+                    }
+                },
+                "governance": {
+                    "obligationPolicies": [{
+                        "id": "p1",
+                        "activateWhen": activate_when,
+                        "onViolation": "block"
+                    }]
+                }
+            }),
+        )
+    }
+
+    #[test]
+    fn act003_known_event_is_clean() {
+        let doc = workflow_with_activate_when(json!({ "on": { "event": "caseFileUpdated" } }));
+        let mut diag = Vec::new();
+        check_obligation_activation_structure(&doc, &mut diag);
+        assert!(
+            !diag.iter().any(|d| d.rule_id == "ACT-003"),
+            "unexpected ACT-003: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act003_unknown_event_warns() {
+        let doc = workflow_with_activate_when(json!({ "on": { "event": "neverDeclared" } }));
+        let mut diag = Vec::new();
+        check_obligation_activation_structure(&doc, &mut diag);
+        assert!(
+            diag.iter()
+                .any(|d| d.rule_id == "ACT-003" && d.severity == LintSeverity::Warning),
+            "expected ACT-003 warning: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act003_dynamic_event_escape_hatch_is_clean() {
+        let doc = workflow_with_activate_when(json!({ "on": { "event": "$dynamic" } }));
+        let mut diag = Vec::new();
+        check_obligation_activation_structure(&doc, &mut diag);
+        assert!(
+            !diag.iter().any(|d| d.rule_id == "ACT-003"),
+            "unexpected ACT-003 on dynamic event: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act004_declared_case_file_field_is_clean() {
+        let doc = workflow_with_activate_when(json!({
+            "on": { "event": "caseFileUpdated" },
+            "requiredData": ["caseFile.income"]
+        }));
+        let mut diag = Vec::new();
+        check_obligation_activation_structure(&doc, &mut diag);
+        assert!(
+            !diag.iter().any(|d| d.rule_id == "ACT-004"),
+            "unexpected ACT-004: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act004_undeclared_case_file_field_warns() {
+        let doc = workflow_with_activate_when(json!({
+            "on": { "event": "caseFileUpdated" },
+            "requiredData": ["caseFile.notAField"]
+        }));
+        let mut diag = Vec::new();
+        check_obligation_activation_structure(&doc, &mut diag);
+        assert!(
+            diag.iter()
+                .any(|d| d.rule_id == "ACT-004" && d.severity == LintSeverity::Warning),
+            "expected ACT-004 warning: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act004_malformed_path_warns() {
+        let doc = workflow_with_activate_when(json!({
+            "on": { "event": "caseFileUpdated" },
+            "requiredData": ["caseFile..income"]
+        }));
+        let mut diag = Vec::new();
+        check_obligation_activation_structure(&doc, &mut diag);
+        assert!(
+            diag.iter().any(|d| d.rule_id == "ACT-004"),
+            "expected ACT-004 warning for malformed path: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act004_contract_backed_case_file_is_skipped() {
+        let doc = make_doc(
+            DocumentKind::Workflow,
+            json!({
+                "$wosWorkflow": true,
+                "caseFile": { "contractRef": "https://agency.gov/c.json" },
+                "lifecycle": { "states": { "open": {} } },
+                "governance": {
+                    "obligationPolicies": [{
+                        "id": "p1",
+                        "activateWhen": {
+                            "on": { "event": "$x" },
+                            "requiredData": ["caseFile.anything"]
+                        }
+                    }]
+                }
+            }),
+        );
+        let mut diag = Vec::new();
+        check_obligation_activation_structure(&doc, &mut diag);
+        assert!(
+            !diag.iter().any(|d| d.rule_id == "ACT-004"),
+            "unexpected ACT-004 against contract-backed case file: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act005_valid_iso_duration_is_clean() {
+        let doc = workflow_with_activate_when(json!({
+            "on": { "event": "caseFileUpdated" },
+            "within": "P3D"
+        }));
+        let mut diag = Vec::new();
+        check_obligation_activation_structure(&doc, &mut diag);
+        assert!(
+            !diag.iter().any(|d| d.rule_id == "ACT-005"),
+            "unexpected ACT-005: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act005_valid_iso_datetime_duration_is_clean() {
+        let doc = workflow_with_activate_when(json!({
+            "on": { "event": "caseFileUpdated" },
+            "within": "P1DT12H30M"
+        }));
+        let mut diag = Vec::new();
+        check_obligation_activation_structure(&doc, &mut diag);
+        assert!(
+            !diag.iter().any(|d| d.rule_id == "ACT-005"),
+            "unexpected ACT-005: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act005_garbage_within_errors() {
+        let doc = workflow_with_activate_when(json!({
+            "on": { "event": "caseFileUpdated" },
+            "within": "indefinite"
+        }));
+        let mut diag = Vec::new();
+        check_obligation_activation_structure(&doc, &mut diag);
+        assert!(
+            diag.iter()
+                .any(|d| d.rule_id == "ACT-005" && d.severity == LintSeverity::Error),
+            "expected ACT-005 error for 'indefinite': {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act005_empty_within_errors() {
+        let doc = workflow_with_activate_when(json!({
+            "on": { "event": "caseFileUpdated" },
+            "within": ""
+        }));
+        let mut diag = Vec::new();
+        check_obligation_activation_structure(&doc, &mut diag);
+        assert!(
+            diag.iter()
+                .any(|d| d.rule_id == "ACT-005" && d.severity == LintSeverity::Error),
+            "expected ACT-005 error for empty within: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act005_deadline_within_is_checked() {
+        let doc = make_doc(
+            DocumentKind::Workflow,
+            json!({
+                "$wosWorkflow": true,
+                "lifecycle": { "states": { "open": {} } },
+                "governance": {
+                    "obligationPolicies": [{
+                        "id": "p1",
+                        "activateWhen": { "on": { "event": "$x" } },
+                        "deadline": { "within": "notaduration" }
+                    }]
+                }
+            }),
+        );
+        let mut diag = Vec::new();
+        check_obligation_activation_structure(&doc, &mut diag);
+        assert!(
+            diag.iter().any(|d| d.rule_id == "ACT-005"
+                && d.path == "/governance/obligationPolicies/0/deadline/within"),
+            "expected ACT-005 on deadline.within: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act006_business_day_without_calendar_warns() {
+        let doc = workflow_with_activate_when(json!({
+            "on": { "event": "caseFileUpdated" },
+            "within": "P5BD"
+        }));
+        let mut diag = Vec::new();
+        check_obligation_activation_structure(&doc, &mut diag);
+        assert!(
+            diag.iter()
+                .any(|d| d.rule_id == "ACT-006" && d.severity == LintSeverity::Warning),
+            "expected ACT-006 warning: {diag:?}"
+        );
+        // A valid `P5BD` must not also trip ACT-005.
+        assert!(
+            !diag.iter().any(|d| d.rule_id == "ACT-005"),
+            "unexpected ACT-005 on valid business-day duration: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act006_business_day_with_calendar_is_clean() {
+        let doc = workflow_with_activate_when(json!({
+            "on": { "event": "caseFileUpdated" },
+            "within": "P5BD",
+            "calendarRef": "https://agency.gov/calendars/federal.json"
+        }));
+        let mut diag = Vec::new();
+        check_obligation_activation_structure(&doc, &mut diag);
+        assert!(
+            !diag.iter().any(|d| d.rule_id == "ACT-006"),
+            "unexpected ACT-006: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act007_resolvable_local_ref_is_clean() {
+        let doc = make_doc(
+            DocumentKind::Workflow,
+            json!({
+                "$wosWorkflow": true,
+                "lifecycle": { "states": { "open": {} } },
+                "$defs": {
+                    "filedCriteria": { "on": { "event": "$x" } }
+                },
+                "governance": {
+                    "obligationPolicies": [{
+                        "id": "p1",
+                        "activateWhen": { "activationCriteriaRef": "#/$defs/filedCriteria" }
+                    }]
+                }
+            }),
+        );
+        let mut diag = Vec::new();
+        check_obligation_activation_structure(&doc, &mut diag);
+        assert!(
+            !diag.iter().any(|d| d.rule_id == "ACT-007"),
+            "unexpected ACT-007: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act007_missing_local_ref_errors() {
+        let doc = make_doc(
+            DocumentKind::Workflow,
+            json!({
+                "$wosWorkflow": true,
+                "lifecycle": { "states": { "open": {} } },
+                "governance": {
+                    "obligationPolicies": [{
+                        "id": "p1",
+                        "activateWhen": { "activationCriteriaRef": "#/$defs/missing" }
+                    }]
+                }
+            }),
+        );
+        let mut diag = Vec::new();
+        check_obligation_activation_structure(&doc, &mut diag);
+        assert!(
+            diag.iter()
+                .any(|d| d.rule_id == "ACT-007" && d.severity == LintSeverity::Error),
+            "expected ACT-007 error: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn act007_external_uri_ref_is_accepted() {
+        let doc = make_doc(
+            DocumentKind::Workflow,
+            json!({
+                "$wosWorkflow": true,
+                "lifecycle": { "states": { "open": {} } },
+                "governance": {
+                    "obligationPolicies": [{
+                        "id": "p1",
+                        "activateWhen": {
+                            "activationCriteriaRef": "https://agency.gov/lib.json#/$defs/x"
+                        }
+                    }]
+                }
+            }),
+        );
+        let mut diag = Vec::new();
+        check_obligation_activation_structure(&doc, &mut diag);
+        assert!(
+            !diag.iter().any(|d| d.rule_id == "ACT-007"),
+            "unexpected ACT-007 for external URI: {diag:?}"
+        );
+    }
+
+    #[test]
+    fn classify_duration_cases() {
+        assert_eq!(classify_duration("P3D"), DurationKind::Iso);
+        assert_eq!(classify_duration("PT30M"), DurationKind::Iso);
+        assert_eq!(classify_duration("P1Y2M10DT2H30M"), DurationKind::Iso);
+        assert_eq!(classify_duration("P10BD"), DurationKind::BusinessDay);
+        assert_eq!(classify_duration("P0BD"), DurationKind::Invalid);
+        assert_eq!(classify_duration("PBD"), DurationKind::Invalid);
+        assert_eq!(classify_duration("P"), DurationKind::Invalid);
+        assert_eq!(classify_duration("PT"), DurationKind::Invalid);
+        assert_eq!(classify_duration(""), DurationKind::Invalid);
+        assert_eq!(classify_duration("indefinite"), DurationKind::Invalid);
+        assert_eq!(classify_duration("3D"), DurationKind::Invalid);
+        assert_eq!(classify_duration("PXD"), DurationKind::Invalid);
     }
 }

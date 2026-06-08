@@ -117,6 +117,66 @@ static ALL_LINT_RULES: &[RuleMetadata] = &[
             "Make `where` a boolean expression (comparison/logical), not a bare field or literal.",
         ),
     },
+    RuleMetadata {
+        id: "ACT-003",
+        tier: Tier::T2,
+        severity: LintSeverity::Warning,
+        summary: "Activation trigger `on.event` SHOULD resolve to a known workflow event.",
+        fixtures: &[],
+        graduation: Graduation::Draft,
+        spec_ref: Some("governance/workflow-governance.md#16.4"),
+        suggested_fix: Some(
+            "Use a transition or timer-fire event declared in the workflow lifecycle.",
+        ),
+    },
+    RuleMetadata {
+        id: "ACT-004",
+        tier: Tier::T2,
+        severity: LintSeverity::Warning,
+        summary: "Activation `requiredData` paths SHOULD resolve to known case-file fields.",
+        fixtures: &[],
+        graduation: Graduation::Draft,
+        spec_ref: Some("governance/workflow-governance.md#16.4"),
+        suggested_fix: Some(
+            "Declare the field under `caseFile.fields`, or fix the dotted path.",
+        ),
+    },
+    RuleMetadata {
+        id: "ACT-005",
+        tier: Tier::T2,
+        severity: LintSeverity::Error,
+        summary: "Activation/deadline `within` MUST be a valid ISO-8601 / `P<N>BD` duration.",
+        fixtures: &[],
+        graduation: Graduation::Draft,
+        spec_ref: Some("governance/workflow-governance.md#16.4"),
+        suggested_fix: Some(
+            "Use an ISO-8601 duration (e.g. `P3D`, `PT12H`) or the business-day form `P<N>BD`.",
+        ),
+    },
+    RuleMetadata {
+        id: "ACT-006",
+        tier: Tier::T2,
+        severity: LintSeverity::Warning,
+        summary: "Business-day `within` SHOULD declare a resolvable `calendarRef`.",
+        fixtures: &[],
+        graduation: Graduation::Draft,
+        spec_ref: Some("governance/workflow-governance.md#16.4"),
+        suggested_fix: Some(
+            "Add a sibling `calendarRef` so business days resolve against a known calendar.",
+        ),
+    },
+    RuleMetadata {
+        id: "ACT-007",
+        tier: Tier::T2,
+        severity: LintSeverity::Error,
+        summary: "`activationCriteriaRef` MUST resolve to a named criteria (no duplicate ids).",
+        fixtures: &[],
+        graduation: Graduation::Draft,
+        spec_ref: Some("governance/workflow-governance.md#16.4"),
+        suggested_fix: Some(
+            "Point `activationCriteriaRef` at an existing local `#/$defs/...` node or a valid URI.",
+        ),
+    },
     // --- AG (Advanced Governance) -------------------------------------
     RuleMetadata {
         id: "AG-008",
